@@ -7,6 +7,7 @@ app.use(cors());
 app.use(express.json());
 
 app.use('/api/auth', require('./routes/auth'));
+app.use('/api/workers', require('./routes/workers'));
 
 app.get('/', (req, res) => {
   res.json({ status: 'BeyondX API is running' });
