@@ -159,4 +159,61 @@ router.post('/employer-register', async (req, res) => {
   }
 });
 
+// POST /api/auth/worker-register
+router.post('/worker-register', async (req, res) => {
+  const { fullName, phone, prisonFacility, skills, pin } = req.body;
+
+  if (!fullName || !pin) {
+    return res.status(400).json({ error: 'Full name and PIN are required' });
+  }
+
+  try {
+    // Generate unique worker ID
+    const count = await prisma.worker.count();
+    const workerId = `BX-${String(count + 1).padStart(5, '0')}`;
+
+    const pinHash = await bcrypt.hash(pin, 10);
+
+    const worker = await prisma.worker.create({
+      data: {
+        workerId,
+        fullName,
+        pinHash,
+        phone,
+        prisonFacility,
+        skills:        skills || [],
+        isActive:      true,
+        gpsVerified:   false,
+        dailyCharge:   80,
+        rating:        0,
+        tasksCompleted: 0,
+        totalEarned:   0
+      }
+    });
+
+    const token = jwt.sign(
+      { id: worker.id, workerId: worker.workerId, role: 'worker' },
+      process.env.JWT_SECRET,
+      { expiresIn: '8h' }
+    );
+
+    res.status(201).json({
+      token,
+      worker: {
+        workerId:       worker.workerId,
+        fullName:       worker.fullName,
+        tasksCompleted: worker.tasksCompleted,
+        totalEarned:    worker.totalEarned,
+        rating:         worker.rating,
+        gpsVerified:    worker.gpsVerified,
+        skills:         worker.skills
+      }
+    });
+
+  } catch (err) {
+    console.error('Worker register error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 module.exports = router;
