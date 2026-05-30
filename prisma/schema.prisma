@@ -26,6 +26,7 @@ model Worker {
   createdAt      DateTime     @default(now())
   dispatches     Dispatch[]
   ussdSessions   UssdSession[]
+  tasks Task[]
 }
 
 model Employer {
@@ -102,11 +103,14 @@ model Task {
   pay         Decimal
   status      TaskStatus @default(open)
   createdAt   DateTime   @default(now())
+  acceptedBy   Worker?  @relation(fields: [workerId], references: [id])
+workerId     String?
 }
 
 enum TaskStatus {
   open
   accepted
+  pending_confirmation
   completed
   cancelled
 }
