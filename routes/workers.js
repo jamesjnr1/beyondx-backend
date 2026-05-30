@@ -11,7 +11,14 @@ const router  = express.Router();
 router.get('/', async (req, res) => {
   try {
     const workers = await prisma.worker.findMany({
-      where: { isActive: true },
+     where: {
+  isActive: true,
+  tasks: {
+    none: {
+      status: { in: ['accepted', 'pending_confirmation'] }
+    }
+  }
+},
       select: {
         id:             true,
         workerId:       true,
