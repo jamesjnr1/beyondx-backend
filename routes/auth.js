@@ -27,17 +27,18 @@ router.post('/worker-login', async (req, res) => {
       { expiresIn: '8h' }
     );
 
-    res.json({
-      token,
-      worker: {
-        workerId: worker.workerId,
-        fullName: worker.fullName,
-        tasksCompleted: worker.tasksCompleted,
-        totalEarned: worker.totalEarned,
-        rating: worker.rating,
-        skills: worker.skills
-      }
-    });
+  res.json({
+  token,
+  worker: {
+    workerId: worker.workerId,
+    fullName: worker.fullName,
+    phone: worker.phone,
+    tasksCompleted: worker.tasksCompleted,
+    totalEarned: worker.totalEarned,
+    rating: worker.rating,
+    skills: worker.skills
+  }
+});
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });
@@ -181,17 +182,18 @@ router.post('/worker-register', async (req, res) => {
     );
 
     res.status(201).json({
-      token,
-      worker: {
-        workerId:       worker.workerId,
-        fullName:       worker.fullName,
-        tasksCompleted: worker.tasksCompleted,
-        totalEarned:    worker.totalEarned,
-        rating:         worker.rating,
-        gpsVerified:    worker.gpsVerified,
-        skills:         worker.skills
-      }
-    });
+  token,
+  worker: {
+    workerId:       worker.workerId,
+    fullName:       worker.fullName,
+    phone:          worker.phone,
+    tasksCompleted: worker.tasksCompleted,
+    totalEarned:    worker.totalEarned,
+    rating:         worker.rating,
+    gpsVerified:    worker.gpsVerified,
+    skills:         worker.skills
+  }
+});
 
   } catch (err) {
     console.error('Worker register error:', err);
