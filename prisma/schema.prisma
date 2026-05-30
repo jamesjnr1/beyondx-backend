@@ -42,6 +42,7 @@ model Employer {
   createdAt     DateTime   @default(now())
   dispatches    Dispatch[]
   payments      Payment[]
+  tasks      Task[]
 }
 
 model Dispatch {
@@ -88,6 +89,26 @@ model UssdSession {
   data      Json     @default("{}")
   expiresAt DateTime
   createdAt DateTime @default(now())
+}
+
+model Task {
+  id          String     @id @default(uuid())
+  employer    Employer   @relation(fields: [employerId], references: [id])
+  employerId  String
+  taskType    String
+  description String?
+  location    String
+  duration    String
+  pay         Decimal
+  status      TaskStatus @default(open)
+  createdAt   DateTime   @default(now())
+}
+
+enum TaskStatus {
+  open
+  accepted
+  completed
+  cancelled
 }
 
 enum OffenseLevel {
