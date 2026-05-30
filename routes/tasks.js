@@ -116,12 +116,12 @@ router.patch('/:id/worker-done', authWorker, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
-// PATCH /api/tasks/:id/complete — employer confirms task is done
+// PATCH /api/tasks/:id/complete — employer confirms work is done (moves to pending_confirmation for admin to pay)
 router.patch('/:id/complete', authEmployer, async (req, res) => {
   try {
     const task = await prisma.task.update({
       where: { id: req.params.id },
-      data: { status: 'completed' }
+      data: { status: 'pending_confirmation' }
     });
     res.json({ task });
   } catch (err) { res.status(500).json({ error: 'Server error' }); }
