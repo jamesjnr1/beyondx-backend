@@ -11,29 +11,15 @@ const router  = express.Router();
 // POST /api/auth/worker-login
 // Body: { workerId, pin }
 router.post('/worker-login', async (req, res) => {
-  const { workerId, pin } = req.body;
-
-  if (!workerId || !pin) {
-    return res.status(400).json({ error: 'Worker ID and PIN are required' });
-  }
+  const { phone, pin } = req.body;
+  if (!phone || !pin) return res.status(400).json({ error: 'Phone and PIN are required' });
 
   try {
-    const worker = await prisma.worker.findUnique({
-      where: { workerId: workerId.toUpperCase() }
-    });
+    const worker = await prisma.worker.findFirst({ where: { phone } });
+    if (!worker) return res.status(401).json({ error: 'No account found with that phone number.' });
 
-    if (!worker) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    if (!worker.isActive) {
-      return res.status(403).json({ error: 'Account is inactive. Contact your GPS coordinator.' });
-    }
-
-    const validPin = await bcrypt.compare(pin, worker.pinHash);
-    if (!validPin) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
+    const valid = await bcrypt.compare(pin, worker.pinHash);
+    if (!valid) return res.status(401).json({ error: 'Incorrect PIN.' });
 
     const token = jwt.sign(
       { id: worker.id, workerId: worker.workerId, role: 'worker' },
@@ -44,22 +30,19 @@ router.post('/worker-login', async (req, res) => {
     res.json({
       token,
       worker: {
-        workerId:       worker.workerId,
-        fullName:       worker.fullName,
+        workerId: worker.workerId,
+        fullName: worker.fullName,
         tasksCompleted: worker.tasksCompleted,
-        totalEarned:    worker.totalEarned,
-        rating:         worker.rating,
-        gpsVerified:    worker.gpsVerified,
-        skills:         worker.skills
+        totalEarned: worker.totalEarned,
+        rating: worker.rating,
+        skills: worker.skills
       }
     });
-
   } catch (err) {
-    console.error('Worker login error:', err);
+    console.error(err);
     res.status(500).json({ error: 'Server error' });
   }
 });
-
 // ── EMPLOYER LOGIN ────────────────────────────
 // POST /api/auth/employer-login
 // Body: { email, password }
