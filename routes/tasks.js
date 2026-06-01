@@ -128,3 +128,15 @@ router.patch('/:id/complete', authEmployer, async (req, res) => {
 });
 
 module.exports = router;
+
+// GET /api/tasks/worker-history — worker's completed tasks
+router.get('/worker-history', authWorker, async (req, res) => {
+  try {
+    const tasks = await prisma.task.findMany({
+      where: { workerId: req.workerId, status: 'completed' },
+      include: { employer: { select: { orgName: true } } },
+      orderBy: { createdAt: 'desc' }
+    });
+    res.json({ tasks });
+  } catch (err) { res.status(500).json({ error: 'Server error' }); }
+});
