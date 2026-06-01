@@ -111,6 +111,7 @@ enum TaskStatus {
   open
   accepted
   pending_confirmation
+  employer_confirmed
   completed
   cancelled
 }

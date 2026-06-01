@@ -84,7 +84,7 @@ router.get('/all', authEmployer, async (req, res) => {
 router.get('/mine', authWorker, async (req, res) => {
   try {
     const tasks = await prisma.task.findMany({
-      where: { workerId: req.workerId, status: { in: ['accepted', 'pending_confirmation'] } },
+      where: { workerId: req.workerId, status: { in: ['accepted', 'pending_confirmation', 'employer_confirmed'] } },
       include: { employer: { select: { orgName: true, contactPerson: true, phone: true, address: true } } },
       orderBy: { createdAt: 'desc' }
     });
@@ -121,7 +121,7 @@ router.patch('/:id/complete', authEmployer, async (req, res) => {
   try {
     const task = await prisma.task.update({
       where: { id: req.params.id },
-      data: { status: 'pending_confirmation' }
+      data: { status: 'employer_confirmed' }
     });
     res.json({ task });
   } catch (err) { res.status(500).json({ error: 'Server error' }); }

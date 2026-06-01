@@ -19,7 +19,7 @@ function adminAuth(req, res, next) {
 router.get('/payouts', adminAuth, async (req, res) => {
   try {
     const tasks = await prisma.task.findMany({
-      where: { status: 'pending_confirmation' },
+      where: { status: 'employer_confirmed' },
       include: {
         acceptedBy: { select: { fullName: true, workerId: true, phone: true } },
         employer: { select: { orgName: true, contactPerson: true, phone: true } }
