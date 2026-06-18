@@ -10,6 +10,7 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/workers', require('./routes/workers'));
 app.use('/admin', require('./routes/admin'));
 app.use('/api/tasks', require('./routes/tasks'));
+app.use('/api/verification', require('./routes/verification'));
 
 app.get('/', (req, res) => {
   res.json({ status: 'BeyondX API is running' });

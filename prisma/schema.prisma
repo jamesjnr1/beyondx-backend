@@ -23,6 +23,10 @@ model Worker {
   totalEarned    Decimal      @default(0)
   isActive       Boolean      @default(true)
   gpsVerified    Boolean      @default(false)
+  idVerified        Boolean   @default(false)
+  idVerificationRef String?
+  idType            String?
+  idCardNumber      String?
   createdAt      DateTime     @default(now())
   dispatches     Dispatch[]
   ussdSessions   UssdSession[]
