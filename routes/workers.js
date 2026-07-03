@@ -49,10 +49,29 @@ router.get('/', async (req, res) => {
         offenseLevel:   true,
         gpsVerified:    true,
         prisonFacility: true,
-        photoUrl:       true
+        photoUrl:       true,
+        reviewsReceived: {
+          where: { fromRole: 'employer' },
+          select: {
+            rating: true, comment: true, createdAt: true,
+            task: { select: { taskType: true, employer: { select: { orgName: true } } } }
+          },
+          orderBy: { createdAt: 'desc' }
+        }
       }
     });
-    res.json({ workers });
+    // Flatten task->employer.orgName into a simple reviewerName field
+    const flattened = workers.map(w => ({
+      ...w,
+      reviewsReceived: (w.reviewsReceived || []).map(r => ({
+        rating: r.rating,
+        comment: r.comment,
+        createdAt: r.createdAt,
+        taskType: r.task?.taskType || null,
+        reviewerName: r.task?.employer?.orgName || 'A BeyondX Employer'
+      }))
+    }));
+    res.json({ workers: flattened });
   } catch (err) {
     console.error('Fetch workers error:', err);
     res.status(500).json({ error: 'Could not fetch workers' });
@@ -69,7 +88,12 @@ router.get('/me', authWorker, async (req, res) => {
         skills: true, bio: true, dailyCharge: true, rating: true,
         tasksCompleted: true, totalEarned: true, gpsVerified: true,
         guarantorName: true, guarantorPhone: true, guarantorRelationship: true,
-        photoUrl: true
+        photoUrl: true,
+        reviewsReceived: {
+          where: { fromRole: 'employer' },
+          select: { rating: true, comment: true, createdAt: true },
+          orderBy: { createdAt: 'desc' }
+        }
       }
     });
     if (!worker) return res.status(404).json({ error: 'Worker not found' });
