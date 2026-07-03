@@ -38,7 +38,8 @@ router.get('/all', adminAuth, async (req, res) => {
     const tasks = await prisma.task.findMany({
       include: {
         acceptedBy: { select: { fullName: true, workerId: true, phone: true } },
-        employer: { select: { orgName: true, phone: true } }
+        employer: { select: { orgName: true, phone: true } },
+        reviews: true
       },
       orderBy: { createdAt: 'desc' }
     });
