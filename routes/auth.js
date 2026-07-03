@@ -26,10 +26,29 @@ router.get('/employer-profile', authEmployer, async (req, res) => {
       where: { id: req.employerId },
       select: {
         orgName: true, contactPerson: true, email: true, phone: true,
-        region: true, isVerified: true, rating: true, logoUrl: true
+        region: true, isVerified: true, rating: true, logoUrl: true,
+        reviewsReceived: {
+          where: { fromRole: 'worker' },
+          select: {
+            rating: true, comment: true, createdAt: true,
+            task: { select: { taskType: true, acceptedBy: { select: { fullName: true } } } }
+          },
+          orderBy: { createdAt: 'desc' }
+        }
       }
     });
     if (!employer) return res.status(404).json({ error: 'Employer not found' });
+    // Flatten the nested task->acceptedBy shape into a simple workerName field
+    // so the frontend doesn't need to know about the underlying structure.
+    if (employer.reviewsReceived) {
+      employer.reviewsReceived = employer.reviewsReceived.map(r => ({
+        rating: r.rating,
+        comment: r.comment,
+        createdAt: r.createdAt,
+        taskType: r.task?.taskType || null,
+        reviewerName: r.task?.acceptedBy?.fullName || 'A BeyondX Worker'
+      }));
+    }
     res.json({ employer });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
@@ -64,6 +83,28 @@ router.patch('/employer-profile', authEmployer, async (req, res) => {
     const employer = await prisma.employer.update({ where: { id: req.employerId }, data });
     res.json({ employer });
   } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/auth/employer-reviews — reviews written by workers about the
+// logged-in employer, most recent first.
+router.get('/employer-reviews', authEmployer, async (req, res) => {
+  try {
+    const reviews = await prisma.review.findMany({
+      where: { employerId: req.employerId, fromRole: 'worker' },
+      include: { task: { include: { acceptedBy: { select: { fullName: true } } } } },
+      orderBy: { createdAt: 'desc' }
+    });
+    const formatted = reviews.map(r => ({
+      rating: r.rating,
+      comment: r.comment,
+      createdAt: r.createdAt,
+      from: r.task?.acceptedBy?.fullName || 'A Worker'
+    }));
+    res.json({ reviews: formatted });
+  } catch (err) {
+    console.error('Fetch employer reviews error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
