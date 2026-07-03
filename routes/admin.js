@@ -92,4 +92,37 @@ router.delete('/clear-data', adminAuth, async (req, res) => {
   }
 });
 
+// DELETE /admin/clear-employers — permanently delete ALL employer accounts,
+// and everything that references them (their tasks, dispatches, payments,
+// and any reviews about them or written by them). Workers themselves are
+// NOT deleted, but any worker stats derived from these tasks (tasksCompleted,
+// totalEarned) are reset to zero since the underlying transactions are gone.
+router.delete('/clear-employers', adminAuth, async (req, res) => {
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      // Reviews reference tasks (and optionally employers/workers directly),
+      // so clear those first to avoid foreign key errors.
+      const reviews = await tx.review.deleteMany({});
+      const payments = await tx.payment.deleteMany({});
+      const dispatches = await tx.dispatch.deleteMany({});
+      const tasks = await tx.task.deleteMany({});
+      const employers = await tx.employer.deleteMany({});
+      await tx.worker.updateMany({
+        data: { tasksCompleted: 0, totalEarned: 0, rating: 0 }
+      });
+      return {
+        employers: employers.count,
+        tasks: tasks.count,
+        dispatches: dispatches.count,
+        payments: payments.count,
+        reviews: reviews.count
+      };
+    });
+    res.json({ success: true, cleared: result });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 module.exports = router;
