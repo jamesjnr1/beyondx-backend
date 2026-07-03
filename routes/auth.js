@@ -138,6 +138,7 @@ router.post('/employer-login', async (req, res) => {
     res.json({
       token,
       employer: {
+        email:         employer.email,
         orgName:       employer.orgName,
         contactPerson: employer.contactPerson,
         isVerified:    employer.isVerified,
@@ -193,6 +194,7 @@ router.post('/employer-register', async (req, res) => {
     res.status(201).json({
       token,
       employer: {
+        email:      employer.email,
         orgName:    employer.orgName,
         isVerified: employer.isVerified
       }
