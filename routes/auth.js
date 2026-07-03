@@ -216,31 +216,61 @@ router.post('/worker-register', async (req, res) => {
   }
 
   try {
-    // Generate unique worker ID
-    const count = await prisma.worker.count();
-    const workerId = `BX-${String(count + 1).padStart(5, '0')}`;
-
     const pinHash = await bcrypt.hash(pin, 10);
 
-    const worker = await prisma.worker.create({
-      data: {
-        workerId,
-        fullName,
-        pinHash,
-        phone,
-        prisonFacility,
-        skills:        skills || [],
-        isActive:      true,
-        gpsVerified:   false,
-        dailyCharge:   80,
-        rating:        0,
-        tasksCompleted: 0,
-        totalEarned:   0,
-        guarantorName,
-        guarantorPhone,
-        guarantorRelationship: guarantorRelationship || null
+    // Generate a unique worker ID by finding the highest existing BX-##### and
+    // incrementing it — count() alone is unsafe here (if any worker was ever
+    // deleted, or IDs became non-sequential, count+1 can collide with an
+    // existing ID). We also retry on the rare chance of a race condition
+    // between two simultaneous registrations.
+    let worker;
+    let lastError;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const lastWorker = await prisma.worker.findFirst({
+        orderBy: { workerId: 'desc' },
+        select: { workerId: true }
+      });
+      let nextNum = 1;
+      if (lastWorker && lastWorker.workerId) {
+        const match = lastWorker.workerId.match(/BX-(\d+)/);
+        if (match) nextNum = parseInt(match[1], 10) + 1 + attempt;
+      } else {
+        nextNum = 1 + attempt;
       }
-    });
+      const workerId = `BX-${String(nextNum).padStart(5, '0')}`;
+
+      try {
+        worker = await prisma.worker.create({
+          data: {
+            workerId,
+            fullName,
+            pinHash,
+            phone,
+            prisonFacility,
+            skills:        skills || [],
+            isActive:      true,
+            gpsVerified:   false,
+            dailyCharge:   80,
+            rating:        0,
+            tasksCompleted: 0,
+            totalEarned:   0,
+            guarantorName,
+            guarantorPhone,
+            guarantorRelationship: guarantorRelationship || null
+          }
+        });
+        break; // success
+      } catch (err) {
+        if (err.code === 'P2002') {
+          lastError = err;
+          continue; // workerId collision — try the next number
+        }
+        throw err; // some other error — don't swallow it
+      }
+    }
+    if (!worker) {
+      throw lastError || new Error('Could not generate a unique worker ID after multiple attempts.');
+    }
 
     const token = jwt.sign(
       { id: worker.id, workerId: worker.workerId, role: 'worker' },
