@@ -121,7 +121,10 @@ router.post('/', authEmployer, async (req, res) => {
     if (workerId && task.acceptedBy) {
       const firstName = (task.acceptedBy.fullName || '').split(' ')[0] || 'there';
       const message = `Hi ${firstName}, BeyondX here. You've been dispatched to a new task: ${taskType} at ${location} for ${task.employer.orgName}. Pay: GHS ${task.pay}. Check your BeyondX dashboard for full details.`;
-      await sendArkeselSMS(task.acceptedBy.phone, message);
+      // Fire-and-forget: don't make the employer wait on a third-party SMS
+      // API call before their dispatch confirmation comes back. Errors are
+      // still logged inside sendArkeselSMS itself.
+      sendArkeselSMS(task.acceptedBy.phone, message);
     }
 
     res.status(201).json({ task });
@@ -190,9 +193,21 @@ router.patch('/:id/worker-done', authWorker, async (req, res) => {
   try {
     const task = await prisma.task.update({
       where: { id: req.params.id },
-      data: { status: 'pending_confirmation' }
+      data: { status: 'pending_confirmation' },
+      include: {
+        acceptedBy: { select: { fullName: true } },
+        employer: { select: { orgName: true, phone: true, contactPerson: true } }
+      }
     });
     res.json({ task });
+
+    // Fire-and-forget — don't make the worker wait on this.
+    if (task.employer?.phone) {
+      const workerFirstName = (task.acceptedBy?.fullName || 'Your worker').split(' ')[0];
+      const contactFirstName = (task.employer.contactPerson || '').split(' ')[0] || 'there';
+      const message = `Hi ${contactFirstName}, BeyondX here. ${workerFirstName} has marked "${task.taskType}" as done. Please log in to your BeyondX dashboard to confirm the work so payment can proceed.`;
+      sendArkeselSMS(task.employer.phone, message);
+    }
   } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
