@@ -7,38 +7,37 @@ const jwt = require('jsonwebtoken');
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
 
-// Sends an SMS via Arkesel. Requires ARKESEL_API_KEY (and optionally
-// ARKESEL_SENDER_ID, defaults to 'BeyondX') set in the environment.
-// Never throws — a failed SMS should never break the task/dispatch flow.
-async function sendArkeselSMS(phone, message) {
-  if (!process.env.ARKESEL_API_KEY) {
-    console.error('ARKESEL_API_KEY is not set — SMS skipped.');
+// Sends an SMS via Hubtel's Quick Send API. Requires HUBTEL_CLIENT_ID and
+// HUBTEL_CLIENT_SECRET (and optionally HUBTEL_SENDER_ID, defaults to
+// 'BeyondX') set in the environment. Never throws — a failed SMS should
+// never break the task/dispatch flow.
+async function sendSMS(phone, message) {
+  if (!process.env.HUBTEL_CLIENT_ID || !process.env.HUBTEL_CLIENT_SECRET) {
+    console.error('HUBTEL_CLIENT_ID or HUBTEL_CLIENT_SECRET is not set — SMS skipped.');
     return;
   }
   if (!phone) {
     console.error('No phone number on file — SMS skipped.');
     return;
   }
-  const recipient = phone.replace(/\s+/g, '').replace(/^0/, '233');
+  // Hubtel requires international format with a leading +, e.g. +233244000000
+  const recipient = '+233' + phone.replace(/\s+/g, '').replace(/^0/, '');
   try {
-    const resp = await fetch('https://sms.arkesel.com/api/v2/sms/send', {
-      method: 'POST',
-      headers: {
-        'api-key': process.env.ARKESEL_API_KEY,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        sender: process.env.ARKESEL_SENDER_ID || 'BeyondX',
-        message,
-        recipients: [recipient]
-      })
+    const params = new URLSearchParams({
+      From: process.env.HUBTEL_SENDER_ID || 'BeyondX',
+      To: recipient,
+      Content: message,
+      ClientId: process.env.HUBTEL_CLIENT_ID,
+      ClientSecret: process.env.HUBTEL_CLIENT_SECRET,
+      RegisteredDelivery: 'true'
     });
+    const resp = await fetch(`https://smsc.hubtel.com/v1/messages/send?${params.toString()}`);
     const data = await resp.json();
-    if (data.code !== 'ok') {
-      console.error('Arkesel SMS failed:', data);
+    if (data.status !== 0) {
+      console.error('Hubtel SMS failed:', data);
     }
   } catch (err) {
-    console.error('Arkesel SMS error:', err);
+    console.error('Hubtel SMS error:', err);
   }
 }
 
@@ -123,8 +122,8 @@ router.post('/', authEmployer, async (req, res) => {
       const message = `Hi ${firstName}, BeyondX here. You've been dispatched to a new task: ${taskType} at ${location} for ${task.employer.orgName}. Pay: GHS ${task.pay}. Check your BeyondX dashboard for full details.`;
       // Fire-and-forget: don't make the employer wait on a third-party SMS
       // API call before their dispatch confirmation comes back. Errors are
-      // still logged inside sendArkeselSMS itself.
-      sendArkeselSMS(task.acceptedBy.phone, message);
+      // still logged inside sendSMS itself.
+      sendSMS(task.acceptedBy.phone, message);
     }
 
     res.status(201).json({ task });
@@ -206,7 +205,7 @@ router.patch('/:id/worker-done', authWorker, async (req, res) => {
       const workerFirstName = (task.acceptedBy?.fullName || 'Your worker').split(' ')[0];
       const contactFirstName = (task.employer.contactPerson || '').split(' ')[0] || 'there';
       const message = `Hi ${contactFirstName}, BeyondX here. ${workerFirstName} has marked "${task.taskType}" as done. Please log in to your BeyondX dashboard to confirm the work so payment can proceed.`;
-      sendArkeselSMS(task.employer.phone, message);
+      sendSMS(task.employer.phone, message);
     }
   } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
