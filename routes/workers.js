@@ -25,22 +25,18 @@ const VALID_SKILLS = [
   'Community Services'
 ];
 
-// GET /api/workers — get all active workers
+// GET /api/workers — get all active workers. Busy workers (currently on a
+// job) are still shown, marked via isBusy, rather than hidden entirely —
+// employers should be able to see the full pool and when someone frees up.
 router.get('/', async (req, res) => {
   try {
     const workers = await prisma.worker.findMany({
-     where: {
-  isActive: true,
-  tasks: {
-    none: {
-      status: { in: ['accepted', 'pending_confirmation'] }
-    }
-  }
-},
+      where: { isActive: true },
       select: {
         id:             true,
         workerId:       true,
         fullName:       true,
+        phone:          true,
         skills:         true,
         bio:            true,
         dailyCharge:    true,
@@ -50,6 +46,10 @@ router.get('/', async (req, res) => {
         gpsVerified:    true,
         prisonFacility: true,
         photoUrl:       true,
+        tasks: {
+          where: { status: { in: ['accepted', 'pending_confirmation'] } },
+          select: { id: true }
+        },
         reviewsReceived: {
           where: { fromRole: 'employer' },
           select: {
@@ -60,9 +60,12 @@ router.get('/', async (req, res) => {
         }
       }
     });
-    // Flatten task->employer.orgName into a simple reviewerName field
+    // Flatten task->employer.orgName into a simple reviewerName field,
+    // and turn the active-task lookup into a simple isBusy flag.
     const flattened = workers.map(w => ({
       ...w,
+      isBusy: (w.tasks || []).length > 0,
+      tasks: undefined,
       reviewsReceived: (w.reviewsReceived || []).map(r => ({
         rating: r.rating,
         comment: r.comment,
