@@ -88,6 +88,15 @@ router.post('/', authEmployer, async (req, res) => {
   const { taskType, description, location, duration, pay, workerId } = req.body;
   if (!taskType || !location || !pay) return res.status(400).json({ error: 'taskType, location and pay are required' });
   try {
+    if (workerId) {
+      const activeTask = await prisma.task.findFirst({
+        where: { workerId, status: { in: ['accepted', 'pending_confirmation'] } }
+      });
+      if (activeTask) {
+        return res.status(409).json({ error: 'This worker is already on a job and is not available to dispatch right now.' });
+      }
+    }
+
     const data = {
       employerId: req.employerId,
       taskType,
