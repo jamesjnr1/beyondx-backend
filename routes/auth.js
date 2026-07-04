@@ -3,10 +3,64 @@ const bcrypt  = require('bcryptjs');
 const jwt     = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
 const { PrismaPg } = require('@prisma/adapter-pg');
+const { Resend } = require('resend');
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma  = new PrismaClient({ adapter });
 const router  = express.Router();
+
+let resend = null;
+try {
+  if (process.env.RESEND_API_KEY) {
+    resend = new Resend(process.env.RESEND_API_KEY);
+  } else {
+    console.error('RESEND_API_KEY not set — welcome emails will be skipped.');
+  }
+} catch (err) {
+  console.error('Resend client failed to initialize (non-fatal):', err);
+}
+
+// Fire-and-forget — never let a welcome email/SMS failure block registration.
+async function sendWelcomeEmail(email, orgName, contactPerson) {
+  if (!resend || !email) return;
+  try {
+    const firstName = (contactPerson || '').split(' ')[0] || 'there';
+    await resend.emails.send({
+      from: 'BeyondX <notifications@beyondxco.com>',
+      to: [email],
+      subject: 'Welcome to BeyondX!',
+      html: `
+        <div style="font-family: sans-serif; max-width: 480px;">
+          <h2 style="color:#1A4731;">Welcome to BeyondX, ${firstName}!</h2>
+          <p>Thanks for creating an employer account for <strong>${orgName}</strong>. You can now browse verified workers and start posting tasks.</p>
+          <p>We're still in our early stages and growing the worker pool daily — we'll be in touch as soon as we have a great match for you.</p>
+          <p style="color:#6B7280; font-size:0.85rem;">— The BeyondX Team</p>
+        </div>
+      `,
+    });
+  } catch (err) {
+    console.error('Welcome email failed:', err);
+  }
+}
+
+async function sendWelcomeSMS(phone, fullName) {
+  if (!process.env.ARKESEL_API_KEY || !phone) return;
+  try {
+    const firstName = (fullName || '').split(' ')[0] || 'there';
+    const recipient = phone.replace(/\s+/g, '').replace(/^0/, '233');
+    await fetch('https://sms.arkesel.com/api/v2/sms/send', {
+      method: 'POST',
+      headers: { 'api-key': process.env.ARKESEL_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sender: process.env.ARKESEL_SENDER_ID || 'BeyondX',
+        message: `Hi ${firstName}, welcome to BeyondX! Your account is ready. We're growing the platform daily and will text you as soon as a task matches your skills.`,
+        recipients: [recipient]
+      })
+    });
+  } catch (err) {
+    console.error('Welcome SMS failed:', err);
+  }
+}
 
 function authEmployer(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
@@ -241,6 +295,8 @@ router.post('/employer-register', async (req, res) => {
       }
     });
 
+    sendWelcomeEmail(employer.email, employer.orgName, employer.contactPerson);
+
   } catch (err) {
     console.error('Employer register error:', err);
     res.status(500).json({ error: 'Server error' });
@@ -334,6 +390,8 @@ router.post('/worker-register', async (req, res) => {
     skills:         worker.skills
   }
 });
+
+sendWelcomeSMS(worker.phone, worker.fullName);
 
   } catch (err) {
     console.error('Worker register error:', err);
