@@ -60,6 +60,8 @@ async function sendWelcomeSMS(phone, fullName) {
     const data = await resp.json();
     if (data.status !== 'success') {
       console.error('Arkesel welcome SMS failed:', data);
+    } else {
+      console.log('Arkesel welcome SMS sent successfully to', recipient, data);
     }
   } catch (err) {
     console.error('Welcome SMS failed:', err);
