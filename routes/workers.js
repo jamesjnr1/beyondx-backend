@@ -47,7 +47,7 @@ router.get('/', async (req, res) => {
         prisonFacility: true,
         photoUrl:       true,
         tasks: {
-          where: { status: { in: ['accepted', 'pending_confirmation'] } },
+          where: { status: { in: ['offered', 'accepted', 'pending_confirmation'] } },
           select: { id: true }
         },
         reviewsReceived: {
