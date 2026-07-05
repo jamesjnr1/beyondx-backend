@@ -34,8 +34,10 @@ async function sendSMS(phone, message) {
       })
     });
     const data = await resp.json();
-    if (data.code !== 'ok') {
+    if (data.status !== 'success') {
       console.error('Arkesel SMS failed:', data);
+    } else {
+      console.log('Arkesel SMS sent successfully to', recipient, data);
     }
   } catch (err) {
     console.error('Arkesel SMS error:', err);
