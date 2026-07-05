@@ -147,6 +147,7 @@ enum ReviewerRole {
 
 enum TaskStatus {
   open
+  offered
   accepted
   pending_confirmation
   employer_confirmed
