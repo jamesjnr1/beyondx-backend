@@ -44,22 +44,22 @@ async function sendWelcomeEmail(email, orgName, contactPerson) {
 }
 
 async function sendWelcomeSMS(phone, fullName) {
-  if (!process.env.HUBTEL_CLIENT_ID || !process.env.HUBTEL_CLIENT_SECRET || !phone) return;
+  if (!process.env.ARKESEL_API_KEY || !phone) return;
   try {
     const firstName = (fullName || '').split(' ')[0] || 'there';
-    const recipient = '+233' + phone.replace(/\s+/g, '').replace(/^0/, '');
-    const params = new URLSearchParams({
-      From: process.env.HUBTEL_SENDER_ID || 'BeyondX',
-      To: recipient,
-      Content: `Hi ${firstName}, welcome to BeyondX! Your account is ready. We're growing the platform daily and will text you as soon as a task matches your skills.`,
-      ClientId: process.env.HUBTEL_CLIENT_ID,
-      ClientSecret: process.env.HUBTEL_CLIENT_SECRET,
-      RegisteredDelivery: 'true'
+    const recipient = phone.replace(/\s+/g, '').replace(/^0/, '233');
+    const resp = await fetch('https://sms.arkesel.com/api/v2/sms/send', {
+      method: 'POST',
+      headers: { 'api-key': process.env.ARKESEL_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sender: process.env.ARKESEL_SENDER_ID || 'BeyondX',
+        message: `Hi ${firstName}, welcome to BeyondX! Your account is ready. We're growing the platform daily and will text you as soon as a task matches your skills.`,
+        recipients: [recipient]
+      })
     });
-    const resp = await fetch(`https://smsc.hubtel.com/v1/messages/send?${params.toString()}`);
     const data = await resp.json();
-    if (data.status !== 0) {
-      console.error('Hubtel welcome SMS failed:', data);
+    if (data.code !== 'ok') {
+      console.error('Arkesel welcome SMS failed:', data);
     }
   } catch (err) {
     console.error('Welcome SMS failed:', err);
