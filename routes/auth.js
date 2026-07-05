@@ -58,7 +58,7 @@ async function sendWelcomeSMS(phone, fullName) {
       })
     });
     const data = await resp.json();
-    if (data.code !== 'ok') {
+    if (data.status !== 'success') {
       console.error('Arkesel welcome SMS failed:', data);
     }
   } catch (err) {
