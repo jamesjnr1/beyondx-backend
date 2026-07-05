@@ -89,10 +89,10 @@ router.post('/', authEmployer, async (req, res) => {
   try {
     if (workerId) {
       const activeTask = await prisma.task.findFirst({
-        where: { workerId, status: { in: ['accepted', 'pending_confirmation'] } }
+        where: { workerId, status: { in: ['offered', 'accepted', 'pending_confirmation'] } }
       });
       if (activeTask) {
-        return res.status(409).json({ error: 'This worker is already on a job and is not available to dispatch right now.' });
+        return res.status(409).json({ error: activeTask.status === 'offered' ? 'This worker already has a pending offer awaiting their response.' : 'This worker is already on a job and is not available to dispatch right now.' });
       }
     }
 
@@ -106,7 +106,7 @@ router.post('/', authEmployer, async (req, res) => {
     };
     if (workerId) {
       data.workerId = workerId;
-      data.status = 'accepted';
+      data.status = 'offered';
     }
 
     const task = await prisma.task.create({
@@ -119,7 +119,7 @@ router.post('/', authEmployer, async (req, res) => {
 
     if (workerId && task.acceptedBy) {
       const firstName = (task.acceptedBy.fullName || '').split(' ')[0] || 'there';
-      const message = `Hi ${firstName}, BeyondX here. You've been dispatched to a new task: ${taskType} at ${location} for ${task.employer.orgName}. Pay: GHS ${task.pay}. Check your BeyondX dashboard for full details.`;
+      const message = `Hi ${firstName}, BeyondX here. ${task.employer.orgName} wants to hire you for: ${taskType} at ${location}. Pay: GHS ${task.pay}. Open your BeyondX dashboard to accept or decline.`;
       // Fire-and-forget: don't make the employer wait on a third-party SMS
       // API call before their dispatch confirmation comes back. Errors are
       // still logged inside sendSMS itself.
@@ -166,7 +166,7 @@ router.get('/all', authEmployer, async (req, res) => {
 router.get('/mine', authWorker, async (req, res) => {
   try {
     const tasks = await prisma.task.findMany({
-      where: { workerId: req.workerId, status: { in: ['accepted', 'pending_confirmation', 'employer_confirmed'] } },
+      where: { workerId: req.workerId, status: { in: ['offered', 'accepted', 'pending_confirmation', 'employer_confirmed'] } },
       include: { employer: { select: { orgName: true, contactPerson: true, phone: true, address: true } }, reviews: true },
       orderBy: { createdAt: 'desc' }
     });
@@ -184,6 +184,49 @@ router.patch('/:id/accept', authWorker, async (req, res) => {
       data: { status: 'accepted', workerId: req.workerId }
     });
     res.json({ task });
+  } catch (err) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// PATCH /api/tasks/:id/accept-offer — worker accepts a direct dispatch offer
+router.patch('/:id/accept-offer', authWorker, async (req, res) => {
+  try {
+    const existing = await prisma.task.findUnique({ where: { id: req.params.id } });
+    if (!existing || existing.workerId !== req.workerId || existing.status !== 'offered') {
+      return res.status(400).json({ error: 'This offer is no longer available to respond to.' });
+    }
+    const task = await prisma.task.update({
+      where: { id: req.params.id },
+      data: { status: 'accepted' }
+    });
+    res.json({ task });
+  } catch (err) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// PATCH /api/tasks/:id/decline-offer — worker declines a direct dispatch offer.
+// The task goes back to the open pool (workerId cleared) so the employer's
+// job doesn't just vanish — it becomes available for another worker, and the
+// employer is notified so they can dispatch someone else directly if they prefer.
+router.patch('/:id/decline-offer', authWorker, async (req, res) => {
+  try {
+    const existing = await prisma.task.findUnique({
+      where: { id: req.params.id },
+      include: { acceptedBy: { select: { fullName: true } }, employer: { select: { phone: true, contactPerson: true, orgName: true } } }
+    });
+    if (!existing || existing.workerId !== req.workerId || existing.status !== 'offered') {
+      return res.status(400).json({ error: 'This offer is no longer available to respond to.' });
+    }
+    const task = await prisma.task.update({
+      where: { id: req.params.id },
+      data: { status: 'open', workerId: null }
+    });
+    res.json({ task });
+
+    if (existing.employer?.phone) {
+      const workerFirstName = (existing.acceptedBy?.fullName || 'The worker').split(' ')[0];
+      const contactFirstName = (existing.employer.contactPerson || '').split(' ')[0] || 'there';
+      const message = `Hi ${contactFirstName}, BeyondX here. ${workerFirstName} declined the "${existing.taskType}" task. It's back in the open pool, or you can dispatch a different worker directly from your dashboard.`;
+      sendSMS(existing.employer.phone, message);
+    }
   } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
