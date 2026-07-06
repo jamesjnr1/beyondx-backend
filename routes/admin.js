@@ -136,6 +136,29 @@ router.delete('/clear-employers', adminAuth, async (req, res) => {
 // GET /admin/workers — full worker data for the admin dashboard, including
 // sensitive fields (guarantor name/phone/relationship) that must NEVER be
 // exposed through the public /api/workers endpoint employers use to browse.
+// GET /admin/employers — full employer list, used for the admin dashboard's
+// "message all employers" broadcast option among other things.
+router.get('/employers', adminAuth, async (req, res) => {
+  try {
+    const employers = await prisma.employer.findMany({
+      select: {
+        id: true,
+        orgName: true,
+        contactPerson: true,
+        phone: true,
+        email: true,
+        isVerified: true,
+        createdAt: true
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+    res.json({ employers });
+  } catch (err) {
+    console.error('Fetch admin employers error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 router.get('/workers', adminAuth, async (req, res) => {
   try {
     const workers = await prisma.worker.findMany({
