@@ -182,3 +182,13 @@ enum PayStatus {
   failed
   reversed
 }
+
+model SmsLog {
+  id          String   @id @default(uuid())
+  phone       String
+  message     String
+  status      String   // 'sent' | 'failed'
+  errorType   String?  // 'low_balance' | 'other' | null
+  errorDetail String?
+  createdAt   DateTime @default(now())
+}
