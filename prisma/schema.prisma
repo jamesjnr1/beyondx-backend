@@ -30,6 +30,7 @@ model Worker {
   guarantorName         String?
   guarantorPhone        String?
   guarantorRelationship String?
+  lastActiveAt          DateTime? @default(now())
   photoUrl              String?
   createdAt      DateTime     @default(now())
   dispatches     Dispatch[]
