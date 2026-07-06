@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { PrismaClient } = require('@prisma/client');
 const { PrismaPg } = require('@prisma/adapter-pg');
+const { sendSMS } = require('../utils/sms');
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
@@ -54,7 +55,8 @@ router.patch('/tasks/:id/paid', adminAuth, async (req, res) => {
   try {
     const task = await prisma.task.update({
       where: { id: req.params.id },
-      data: { status: 'completed' }
+      data: { status: 'completed' },
+      include: { acceptedBy: { select: { fullName: true, phone: true } } }
     });
     if (task.workerId) {
       await prisma.worker.update({
@@ -66,6 +68,11 @@ router.patch('/tasks/:id/paid', adminAuth, async (req, res) => {
       });
     }
     res.json({ task });
+
+    if (task.acceptedBy?.phone) {
+      const firstName = (task.acceptedBy.fullName || '').split(' ')[0] || 'there';
+      sendSMS(task.acceptedBy.phone, `Hi ${firstName}, BeyondX here. You've been paid GHS ${parseFloat(task.pay).toFixed(0)} for "${task.taskType}". Thanks for your great work!`);
+    }
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
@@ -167,6 +174,37 @@ router.get('/workers', adminAuth, async (req, res) => {
     res.json({ workers: flattened });
   } catch (err) {
     console.error('Fetch admin workers error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /admin/sms-logs — recent SMS send attempts, for the admin dashboard
+// to surface delivery problems (especially a depleted Arkesel balance)
+// instead of these only being visible in Railway's server logs.
+router.get('/sms-logs', adminAuth, async (req, res) => {
+  try {
+    const logs = await prisma.smsLog.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 100
+    });
+    res.json({ logs });
+  } catch (err) {
+    console.error('Fetch SMS logs error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /admin/send-sms — lets an admin send a one-off custom SMS to any
+// phone number directly from the dashboard (e.g. following up with a
+// specific worker or employer outside the automated message flow).
+router.post('/send-sms', adminAuth, async (req, res) => {
+  const { phone, message } = req.body;
+  if (!phone || !message) return res.status(400).json({ error: 'phone and message are required' });
+  try {
+    await sendSMS(phone, message);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Custom SMS send error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
