@@ -164,6 +164,8 @@ router.post('/worker-login', async (req, res) => {
     const valid = await bcrypt.compare(pin, worker.pinHash);
     if (!valid) return res.status(401).json({ error: 'Incorrect PIN.' });
 
+    await prisma.worker.update({ where: { id: worker.id }, data: { lastActiveAt: new Date() } });
+
     const token = jwt.sign(
       { id: worker.id, workerId: worker.workerId, role: 'worker' },
       process.env.JWT_SECRET,
