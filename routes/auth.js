@@ -4,6 +4,7 @@ const jwt     = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
 const { PrismaPg } = require('@prisma/adapter-pg');
 const { Resend } = require('resend');
+const { sendSMS } = require('../utils/sms');
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma  = new PrismaClient({ adapter });
@@ -44,28 +45,8 @@ async function sendWelcomeEmail(email, orgName, contactPerson) {
 }
 
 async function sendWelcomeSMS(phone, fullName) {
-  if (!process.env.ARKESEL_API_KEY || !phone) return;
-  try {
-    const firstName = (fullName || '').split(' ')[0] || 'there';
-    const recipient = phone.replace(/\s+/g, '').replace(/^0/, '233');
-    const resp = await fetch('https://sms.arkesel.com/api/v2/sms/send', {
-      method: 'POST',
-      headers: { 'api-key': process.env.ARKESEL_API_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sender: process.env.ARKESEL_SENDER_ID || 'BeyondX',
-        message: `Hi ${firstName}, welcome to BeyondX! Your account is ready. We're growing the platform daily and will text you as soon as a task matches your skills.`,
-        recipients: [recipient]
-      })
-    });
-    const data = await resp.json();
-    if (data.status !== 'success') {
-      console.error('Arkesel welcome SMS failed:', data);
-    } else {
-      console.log('Arkesel welcome SMS sent successfully to', recipient, data);
-    }
-  } catch (err) {
-    console.error('Welcome SMS failed:', err);
-  }
+  const firstName = (fullName || '').split(' ')[0] || 'there';
+  await sendSMS(phone, `Hi ${firstName}, welcome to BeyondX! Your account is ready. We're growing the platform daily and will text you as soon as a task matches your skills.`);
 }
 
 function authEmployer(req, res, next) {
