@@ -3,46 +3,28 @@ const router = express.Router();
 const { PrismaClient } = require('@prisma/client');
 const { PrismaPg } = require('@prisma/adapter-pg');
 const jwt = require('jsonwebtoken');
+const { sendSMS } = require('../utils/sms');
+
+// Maps specific task type strings (from the "Post a Task" dropdown) to the
+// broader skill category workers register under, so open-pool task alerts
+// only reach workers whose skills are actually relevant.
+const TASK_TYPE_TO_CATEGORY = {
+  'office cleaning': 'Facility & Cleaning', 'school compound sweeping': 'Facility & Cleaning', 'hospital ward cleaning': 'Facility & Cleaning',
+  'warehouse stock sorting': 'Logistics & Delivery', 'goods offloading': 'Logistics & Delivery', 'market porter': 'Logistics & Delivery',
+  'painting & touch-up': 'Maintenance & Repairs', 'plumbing support': 'Maintenance & Repairs', 'building site labour': 'Maintenance & Repairs',
+  'chair & table setup': 'Event & Hospitality', 'catering assistant': 'Event & Hospitality', 'food serving': 'Event & Hospitality',
+  'farm weeding': 'Agriculture & Environment', 'grass cutting': 'Agriculture & Environment', 'tree planting': 'Agriculture & Environment',
+  'shop attendant': 'Retail & Trade', 'packing & bagging': 'Retail & Trade', 'loading & offloading': 'Retail & Trade',
+  'waste collection': 'Community Services', 'school painting': 'Community Services', 'drain maintenance': 'Community Services'
+};
+function categoryForTaskType(taskType) {
+  const key = (taskType || '').toLowerCase().trim();
+  return TASK_TYPE_TO_CATEGORY[key] || null;
+}
+
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
-
-// Sends an SMS via Arkesel. Requires ARKESEL_API_KEY (and optionally
-// ARKESEL_SENDER_ID, defaults to 'BeyondX') set in the environment.
-// Never throws — a failed SMS should never break the task/dispatch flow.
-async function sendSMS(phone, message) {
-  if (!process.env.ARKESEL_API_KEY) {
-    console.error('ARKESEL_API_KEY is not set — SMS skipped.');
-    return;
-  }
-  if (!phone) {
-    console.error('No phone number on file — SMS skipped.');
-    return;
-  }
-  const recipient = phone.replace(/\s+/g, '').replace(/^0/, '233');
-  try {
-    const resp = await fetch('https://sms.arkesel.com/api/v2/sms/send', {
-      method: 'POST',
-      headers: {
-        'api-key': process.env.ARKESEL_API_KEY,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        sender: process.env.ARKESEL_SENDER_ID || 'BeyondX',
-        message,
-        recipients: [recipient]
-      })
-    });
-    const data = await resp.json();
-    if (data.status !== 'success') {
-      console.error('Arkesel SMS failed:', data);
-    } else {
-      console.log('Arkesel SMS sent successfully to', recipient, data);
-    }
-  } catch (err) {
-    console.error('Arkesel SMS error:', err);
-  }
-}
 
 function authEmployer(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
@@ -127,6 +109,22 @@ router.post('/', authEmployer, async (req, res) => {
       // API call before their dispatch confirmation comes back. Errors are
       // still logged inside sendSMS itself.
       sendSMS(task.acceptedBy.phone, message);
+    } else if (!workerId) {
+      // Open-pool task — notify active, available workers whose skills
+      // match this task's category, so it's not silent for everyone.
+      const category = categoryForTaskType(taskType);
+      if (category) {
+        const matchingWorkers = await prisma.worker.findMany({
+          where: {
+            isActive: true,
+            skills: { has: category },
+            tasks: { none: { status: { in: ['offered', 'accepted', 'pending_confirmation'] } } }
+          },
+          select: { phone: true, fullName: true }
+        });
+        const message = `Hi there, BeyondX here. A new task is open: ${taskType} at ${location}. Pay: GHS ${task.pay}. Open your BeyondX dashboard to accept it before someone else does.`;
+        matchingWorkers.forEach(w => sendSMS(w.phone, message));
+      }
     }
 
     res.status(201).json({ task });
@@ -199,9 +197,19 @@ router.patch('/:id/accept-offer', authWorker, async (req, res) => {
     }
     const task = await prisma.task.update({
       where: { id: req.params.id },
-      data: { status: 'accepted' }
+      data: { status: 'accepted' },
+      include: {
+        acceptedBy: { select: { fullName: true } },
+        employer: { select: { phone: true, contactPerson: true } }
+      }
     });
     res.json({ task });
+
+    if (task.employer?.phone) {
+      const workerFirstName = (task.acceptedBy?.fullName || 'The worker').split(' ')[0];
+      const contactFirstName = (task.employer.contactPerson || '').split(' ')[0] || 'there';
+      sendSMS(task.employer.phone, `Hi ${contactFirstName}, BeyondX here. ${workerFirstName} accepted the "${task.taskType}" task and will be dispatched as planned.`);
+    }
   } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
