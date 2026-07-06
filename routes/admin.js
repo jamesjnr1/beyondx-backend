@@ -70,8 +70,8 @@ router.patch('/tasks/:id/paid', adminAuth, async (req, res) => {
     res.json({ task });
 
     if (task.acceptedBy?.phone) {
-      const firstName = (task.acceptedBy.fullName || '').split(' ')[0] || 'there';
-      sendSMS(task.acceptedBy.phone, `Hi ${firstName}, BeyondX here. You've been paid GHS ${parseFloat(task.pay).toFixed(0)} for "${task.taskType}". Thanks for your great work!`);
+      const paidAmount = (parseFloat(task.pay) * 0.85).toFixed(0);
+      sendSMS(task.acceptedBy.phone, `You're paid! GHS ${paidAmount} has been transferred to your account. Thank you for choosing BeyondX!`);
     }
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
@@ -205,6 +205,34 @@ router.post('/send-sms', adminAuth, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('Custom SMS send error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /admin/send-dormant-reminders — finds workers who haven't logged in
+// for 7+ days and texts them a reminder to stay visible to employers.
+// Can be triggered manually from the dashboard, or on a schedule via an
+// external cron service (e.g. cron-job.org) hitting this endpoint weekly.
+router.post('/send-dormant-reminders', adminAuth, async (req, res) => {
+  try {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const dormantWorkers = await prisma.worker.findMany({
+      where: {
+        isActive: true,
+        OR: [
+          { lastActiveAt: { lt: sevenDaysAgo } },
+          { lastActiveAt: null }
+        ]
+      },
+      select: { id: true, fullName: true, phone: true, lastActiveAt: true }
+    });
+
+    const message = "We've noticed you haven't been active recently. Log in to BeyondX to stay visible to employers and never miss a job opportunity.";
+    dormantWorkers.forEach(w => sendSMS(w.phone, message));
+
+    res.json({ success: true, notified: dormantWorkers.length, workers: dormantWorkers.map(w => ({ fullName: w.fullName, phone: w.phone, lastActiveAt: w.lastActiveAt })) });
+  } catch (err) {
+    console.error('Send dormant reminders error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
