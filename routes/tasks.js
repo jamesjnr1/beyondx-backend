@@ -104,7 +104,8 @@ router.post('/', authEmployer, async (req, res) => {
 
     if (workerId && task.acceptedBy) {
       const firstName = (task.acceptedBy.fullName || '').split(' ')[0] || 'there';
-      const message = `Hi ${firstName}, BeyondX here. ${task.employer.orgName} wants to hire you for: ${taskType} at ${location}. Pay: GHS ${task.pay}. Open your BeyondX dashboard to accept or decline.`;
+      const workerCut = (parseFloat(task.pay) * 0.85).toFixed(0);
+      const message = `Hi ${firstName}, you've been selected for a job in ${location} paying GHS ${workerCut}. Open your BeyondX dashboard to accept or decline the offer.`;
       // Fire-and-forget: don't make the employer wait on a third-party SMS
       // API call before their dispatch confirmation comes back. Errors are
       // still logged inside sendSMS itself.
@@ -122,7 +123,8 @@ router.post('/', authEmployer, async (req, res) => {
           },
           select: { phone: true, fullName: true }
         });
-        const message = `Hi there, BeyondX here. A new task is open: ${taskType} at ${location}. Pay: GHS ${task.pay}. Open your BeyondX dashboard to accept it before someone else does.`;
+        const openWorkerCut = (parseFloat(task.pay) * 0.85).toFixed(0);
+        const message = `Hi there, a new task is open in ${location} paying GHS ${openWorkerCut}. Open your BeyondX dashboard to accept it before someone else does.`;
         matchingWorkers.forEach(w => sendSMS(w.phone, message));
       }
     }
