@@ -69,7 +69,7 @@ function authEitherParty(req, res, next) {
 // for them via the dispatch flow), the task is assigned directly to that
 // worker instead of being left open, and the worker gets a confirmation SMS.
 router.post('/', authEmployer, async (req, res) => {
-  const { taskType, description, location, duration, pay, workerId } = req.body;
+  const { taskType, description, location, duration, pay, workerId, paymentRef } = req.body;
   if (!taskType || !location || !pay) return res.status(400).json({ error: 'taskType, location and pay are required' });
   try {
     if (workerId) {
@@ -87,7 +87,8 @@ router.post('/', authEmployer, async (req, res) => {
       description: description || '',
       location,
       duration: duration || '1 day',
-      pay: parseFloat(pay)
+      pay: parseFloat(pay),
+      ...(paymentRef ? { paymentRef } : {}),
     };
     if (workerId) {
       data.workerId = workerId;
@@ -104,13 +105,13 @@ router.post('/', authEmployer, async (req, res) => {
       }
     });
 
-    if (workerId && task.acceptedBy) {
+    if (workerId && task.acceptedBy && task.status !== 'payment_pending') {
+      // Only notify the worker once payment has been verified by BeyondX.
+      // When status is payment_pending, the admin console sends the SMS
+      // after manually confirming the payment via Verify Payments.
       const firstName = (task.acceptedBy.fullName || '').split(' ')[0] || 'there';
       const workerCut = (parseFloat(task.pay) * 0.85).toFixed(0);
       const message = `Hi ${firstName}, you've been selected for a job in ${location} paying GHS ${workerCut}. Open your BeyondX dashboard to accept or decline the offer.`;
-      // Fire-and-forget: don't make the employer wait on a third-party SMS
-      // API call before their dispatch confirmation comes back. Errors are
-      // still logged inside sendSMS itself.
       sendSMS(task.acceptedBy.phone, message);
     } else if (!workerId) {
       // Open-pool task — notify active, available workers whose skills

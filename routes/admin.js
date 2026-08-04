@@ -65,8 +65,38 @@ router.patch('/tasks/:id/status', adminAuth, async (req, res) => {
         status,
         ...(adminNote ? { adminNote } : {}),
       },
-      include: { acceptedBy: { select: { fullName: true, phone: true } } }
+      include: {
+        acceptedBy: { select: { fullName: true, phone: true } },
+        employer: { select: { orgName: true, contactPerson: true, phone: true } }
+      }
     });
+
+    // When payment is verified and status advances to 'offered',
+    // send the worker a full job offer SMS with all details.
+    if (status === 'offered' && task.acceptedBy?.phone) {
+      const firstName = (task.acceptedBy.fullName || '').split(' ')[0] || 'there';
+      const workerCut = Number(task.pay || 0).toFixed(0);
+      const emp = task.employer || {};
+      const lines = [
+        `Hi ${firstName}! You have a new job offer from BeyondX.`,
+        '',
+        `Job: ${task.taskType}`,
+        task.description ? `Details: ${task.description}` : null,
+        task.location   ? `Location: ${task.location}` : null,
+        task.duration   ? `Duration: ${task.duration}` : null,
+        `Your pay: GH\u20b5 ${workerCut}`,
+        '',
+        `Employer: ${emp.orgName || 'BeyondX employer'}`,
+        emp.contactPerson ? `Contact: ${emp.contactPerson}` : null,
+        emp.phone         ? `Phone: ${emp.phone}` : null,
+        '',
+        'Open your BeyondX Worker Dashboard at beyondxco.com to accept or decline.',
+        '',
+        '- The BeyondX Team',
+      ].filter(Boolean).join('\n');
+      sendSMS(task.acceptedBy.phone, lines);
+    }
+
     res.json({ ok: true, task });
   } catch (err) {
     if (err.code === 'P2025') return res.status(404).json({ error: 'Task not found.' });

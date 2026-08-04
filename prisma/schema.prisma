@@ -111,6 +111,7 @@ model Task {
   employerId  String
   taskType    String
   description String?
+  paymentRef  String?
   location    String
   duration    String
   pay         Decimal
