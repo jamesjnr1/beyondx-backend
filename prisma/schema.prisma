@@ -148,11 +148,13 @@ enum ReviewerRole {
 
 enum TaskStatus {
   open
+  payment_pending
   offered
   accepted
   pending_confirmation
   employer_confirmed
   completed
+  payment_rejected
   cancelled
 }
 

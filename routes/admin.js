@@ -51,6 +51,29 @@ router.get('/all', adminAuth, async (req, res) => {
 });
 
 // PATCH /admin/tasks/:id/paid — mark worker as paid
+// PATCH /admin/tasks/:id/status — set task status directly (used by verify-payments flow)
+router.patch('/tasks/:id/status', adminAuth, async (req, res) => {
+  const { status, adminNote } = req.body;
+  const allowed = ['offered', 'payment_pending', 'payment_rejected', 'accepted', 'completed', 'pending_confirmation', 'employer_confirmed', 'open', 'cancelled'];
+  if (!status || !allowed.includes(status)) {
+    return res.status(400).json({ error: `status must be one of: ${allowed.join(', ')}` });
+  }
+  try {
+    const task = await prisma.task.update({
+      where: { id: req.params.id },
+      data: {
+        status,
+        ...(adminNote ? { adminNote } : {}),
+      },
+      include: { acceptedBy: { select: { fullName: true, phone: true } } }
+    });
+    res.json({ ok: true, task });
+  } catch (err) {
+    if (err.code === 'P2025') return res.status(404).json({ error: 'Task not found.' });
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 router.patch('/tasks/:id/paid', adminAuth, async (req, res) => {
   try {
     const task = await prisma.task.update({

@@ -91,7 +91,9 @@ router.post('/', authEmployer, async (req, res) => {
     };
     if (workerId) {
       data.workerId = workerId;
-      data.status = 'offered';
+      // If the employer submitted payment details, hold as payment_pending until
+      // BeyondX manually verifies the payment before notifying the worker.
+      data.status = req.body.status === 'payment_pending' ? 'payment_pending' : 'offered';
     }
 
     const task = await prisma.task.create({
