@@ -69,7 +69,7 @@ function authEitherParty(req, res, next) {
 // for them via the dispatch flow), the task is assigned directly to that
 // worker instead of being left open, and the worker gets a confirmation SMS.
 router.post('/', authEmployer, async (req, res) => {
-  const { taskType, description, location, duration, pay, workerId } = req.body;
+  const { taskType, description, location, duration, pay, workerId, paymentRef } = req.body;
   if (!taskType || !location || !pay) return res.status(400).json({ error: 'taskType, location and pay are required' });
   try {
     if (workerId) {
@@ -87,7 +87,8 @@ router.post('/', authEmployer, async (req, res) => {
       description: description || '',
       location,
       duration: duration || '1 day',
-      pay: parseFloat(pay)
+      pay: parseFloat(pay),
+      ...(paymentRef ? { paymentRef } : {}),
     };
     if (workerId) {
       data.workerId = workerId;
