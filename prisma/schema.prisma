@@ -116,6 +116,7 @@ model Task {
   duration    String
   pay         Decimal
   status      TaskStatus @default(open)
+  adminNote   String?
   createdAt   DateTime   @default(now())
   acceptedBy   Worker?  @relation(fields: [workerId], references: [id])
 workerId     String?
