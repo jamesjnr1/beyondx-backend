@@ -100,7 +100,11 @@ router.patch('/tasks/:id/status', adminAuth, async (req, res) => {
     res.json({ ok: true, task });
   } catch (err) {
     if (err.code === 'P2025') return res.status(404).json({ error: 'Task not found.' });
-    res.status(500).json({ error: 'Server error' });
+    // Surface the real cause — a hidden generic message here has cost hours
+    // of debugging before (e.g. the TaskStatus enum missing a value in the
+    // live database after a migration was never applied).
+    console.error('[admin] status update failed:', err.message);
+    res.status(500).json({ error: err.message || 'Server error', code: err.code });
   }
 });
 
