@@ -43,7 +43,7 @@ async function expireStaleOffers() {
     console.error('[expireStaleOffers] failed:', err.message);
   }
 }
-module.exports.expireStaleOffers = expireStaleOffers;
+router.expireStaleOffers = expireStaleOffers;
 
 function authEmployer(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
