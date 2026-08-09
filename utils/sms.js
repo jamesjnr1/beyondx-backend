@@ -31,9 +31,29 @@ async function sendSMS(phone, message) {
   }
   if (!phone) {
     console.error('No phone number on file — SMS skipped.');
+    await logSms(phone, message, 'failed', 'invalid_number', 'No phone number on file');
     return;
   }
-  const recipient = phone.replace(/\s+/g, '').replace(/^0/, '233');
+  // Normalize whatever format is in the database — strip everything except
+  // digits and a leading +, then convert to Arkesel's expected 233XXXXXXXXX
+  // form. This handles: '024 123 4567', '0241234567', '+233241234567',
+  // '233241234567', '024-123-4567', etc.
+  let digits = phone.replace(/[^\d+]/g, '');
+  if (digits.startsWith('+')) digits = digits.slice(1);
+  if (digits.startsWith('0')) digits = '233' + digits.slice(1);
+  else if (!digits.startsWith('233')) digits = '233' + digits;
+  const recipient = digits;
+
+  // A valid Ghana MSISDN in this form is exactly 12 digits (233 + 9 digits).
+  // Catching this here — instead of only letting Arkesel silently reject it —
+  // is what actually surfaces 'some people never get SMS' as a visible,
+  // diagnosable log entry instead of a mystery.
+  if (!/^233\d{9}$/.test(recipient)) {
+    console.error('Invalid phone number after normalization:', phone, '->', recipient);
+    await logSms(phone, message, 'failed', 'invalid_number', `Normalized to "${recipient}" — not a valid Ghana MSISDN`);
+    return;
+  }
+
   try {
     const resp = await fetch('https://sms.arkesel.com/api/v2/sms/send', {
       method: 'POST',

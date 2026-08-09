@@ -106,21 +106,33 @@ model UssdSession {
 }
 
 model Task {
-  id          String     @id @default(uuid())
-  employer    Employer   @relation(fields: [employerId], references: [id])
-  employerId  String
-  taskType    String
-  description String?
-  paymentRef  String?
-  location    String
-  duration    String
-  pay         Decimal
-  status      TaskStatus @default(open)
-  adminNote   String?
-  createdAt   DateTime   @default(now())
-  acceptedBy   Worker?  @relation(fields: [workerId], references: [id])
-workerId     String?
-  reviews     Review[]
+  id             String     @id @default(uuid())
+  employer       Employer   @relation(fields: [employerId], references: [id])
+  employerId     String
+  taskType       String
+  description    String?
+  paymentRef     String?
+  location       String
+  duration       String
+  pay            Decimal
+  status         TaskStatus @default(open)
+  adminNote      String?
+  createdAt      DateTime   @default(now())
+  acceptedBy     Worker?    @relation(fields: [workerId], references: [id])
+  workerId       String?
+  reviews        Review[]
+  // Multi-worker slots: when a job needs more than one person, several Task
+  // rows share the same groupId — one per candidate worker offered the job.
+  // slotsNeeded is copied onto every row in the group so any single row can
+  // tell how many total slots the posting needs without a second query.
+  groupId        String?
+  slotsNeeded    Int?
+  // Offer expiry: set when a task is dispatched with a time limit. Checked
+  // lazily on read (see expireStaleOffers in routes/tasks.js) rather than
+  // via a cron job, since Railway has none configured for this project.
+  offerExpiresAt DateTime?
+
+  @@index([groupId])
 }
 
 // A review left on a task, in one direction only: either the worker
@@ -158,6 +170,7 @@ enum TaskStatus {
   completed
   payment_rejected
   cancelled
+  expired
 }
 
 enum OffenseLevel {

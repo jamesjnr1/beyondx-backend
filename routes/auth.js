@@ -299,8 +299,21 @@ router.post('/worker-register', async (req, res) => {
   if (!fullName || !pin) {
     return res.status(400).json({ error: 'Full name and PIN are required' });
   }
+  if (!phone) {
+    return res.status(400).json({ error: 'Phone number is required' });
+  }
+  // Ghana mobile format: 0 + network prefix (2/3/5/7) + 8 digits = 10 digits total.
+  // Without this check, a malformed number silently saves and then fails
+  // at Arkesel with no visible error anywhere — this was the root cause of
+  // some workers never receiving any SMS at all.
+  if (!/^0[2357]\d{8}$/.test(phone)) {
+    return res.status(400).json({ error: 'Please provide a valid Ghana phone number (e.g. 024XXXXXXX).' });
+  }
   if (!guarantorName || !guarantorPhone) {
     return res.status(400).json({ error: 'Guarantor name and phone are required' });
+  }
+  if (!/^0[2357]\d{8}$/.test(guarantorPhone)) {
+    return res.status(400).json({ error: 'Please provide a valid Ghana phone number for the guarantor.' });
   }
 
   try {
