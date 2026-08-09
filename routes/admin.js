@@ -3,6 +3,7 @@ const router = express.Router();
 const { PrismaClient } = require('@prisma/client');
 const { PrismaPg } = require('@prisma/adapter-pg');
 const { sendSMS } = require('../utils/sms');
+const { expireStaleOffers } = require('./tasks');
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
@@ -36,6 +37,7 @@ router.get('/payouts', adminAuth, async (req, res) => {
 // GET /admin/all — all tasks overview
 router.get('/all', adminAuth, async (req, res) => {
   try {
+    await expireStaleOffers();
     const tasks = await prisma.task.findMany({
       include: {
         acceptedBy: { select: { fullName: true, workerId: true, phone: true } },
@@ -54,7 +56,7 @@ router.get('/all', adminAuth, async (req, res) => {
 // PATCH /admin/tasks/:id/status — set task status directly (used by verify-payments flow)
 router.patch('/tasks/:id/status', adminAuth, async (req, res) => {
   const { status, adminNote } = req.body;
-  const allowed = ['offered', 'payment_pending', 'payment_rejected', 'accepted', 'completed', 'pending_confirmation', 'employer_confirmed', 'open', 'cancelled'];
+  const allowed = ['offered', 'payment_pending', 'payment_rejected', 'accepted', 'completed', 'pending_confirmation', 'employer_confirmed', 'open', 'cancelled', 'expired'];
   if (!status || !allowed.includes(status)) {
     return res.status(400).json({ error: `status must be one of: ${allowed.join(', ')}` });
   }
@@ -105,6 +107,105 @@ router.patch('/tasks/:id/status', adminAuth, async (req, res) => {
     // live database after a migration was never applied).
     console.error('[admin] status update failed:', err.message);
     res.status(500).json({ error: err.message || 'Server error', code: err.code });
+  }
+});
+
+// POST /admin/tasks/dispatch-multi — offer a job to several candidate
+// workers at once for a posting that needs more than one person.
+// Creates one Task row per worker, all sharing a groupId + slotsNeeded, each
+// sent the same job-offer SMS. The first `slotsNeeded` to accept fill the
+// job; remaining offers auto-withdraw (see accept-offer in routes/tasks.js).
+//
+// Body: {
+//   sourceTaskId?: string,       // an existing 'open' task to copy details from
+//   taskType, description, location, duration, pay, employerId,  // OR provide these directly
+//   workerIds: string[],         // candidates to offer it to (can exceed slotsNeeded)
+//   slotsNeeded: number,
+//   offerHours?: number,         // optional — offer expires after this many hours
+// }
+router.post('/tasks/dispatch-multi', adminAuth, async (req, res) => {
+  const { sourceTaskId, workerIds, slotsNeeded, offerHours } = req.body;
+  let { taskType, description, location, duration, pay, employerId } = req.body;
+
+  if (!Array.isArray(workerIds) || workerIds.length === 0) {
+    return res.status(400).json({ error: 'workerIds must be a non-empty array.' });
+  }
+  if (!slotsNeeded || slotsNeeded < 1) {
+    return res.status(400).json({ error: 'slotsNeeded must be at least 1.' });
+  }
+  if (workerIds.length < slotsNeeded) {
+    return res.status(400).json({ error: `You are offering to ${workerIds.length} worker(s) but need ${slotsNeeded} — offer to at least ${slotsNeeded}.` });
+  }
+
+  try {
+    if (sourceTaskId) {
+      const source = await prisma.task.findUnique({ where: { id: sourceTaskId } });
+      if (!source) return res.status(404).json({ error: 'Source task not found.' });
+      taskType = taskType || source.taskType;
+      description = description ?? source.description;
+      location = location || source.location;
+      duration = duration || source.duration;
+      pay = pay || source.pay;
+      employerId = employerId || source.employerId;
+    }
+    if (!taskType || !location || !duration || !pay || !employerId) {
+      return res.status(400).json({ error: 'taskType, location, duration, pay, and employerId are required (directly, or via sourceTaskId).' });
+    }
+
+    const groupId = require('crypto').randomUUID();
+    const offerExpiresAt = offerHours ? new Date(Date.now() + offerHours * 3600 * 1000) : null;
+
+    const created = await prisma.$transaction(
+      workerIds.map(workerId => prisma.task.create({
+        data: {
+          employerId, taskType, description: description || '', location, duration,
+          pay: parseFloat(pay), status: 'offered', workerId,
+          groupId, slotsNeeded: parseInt(slotsNeeded, 10), offerExpiresAt,
+        },
+        include: {
+          acceptedBy: { select: { fullName: true, phone: true } },
+          employer: { select: { orgName: true, contactPerson: true, phone: true } },
+        },
+      }))
+    );
+
+    // If this fanned out from an existing 'open' posting, retire that
+    // original row so it doesn't sit around duplicating the group.
+    if (sourceTaskId) {
+      await prisma.task.update({ where: { id: sourceTaskId }, data: { status: 'cancelled', adminNote: 'Superseded by multi-worker dispatch.' } }).catch(() => null);
+    }
+
+    // Notify every candidate worker — same template as the single-worker offer.
+    for (const task of created) {
+      if (!task.acceptedBy?.phone) continue;
+      const firstName = (task.acceptedBy.fullName || '').split(' ')[0] || 'there';
+      const workerCut = Number(task.pay || 0).toFixed(0);
+      const emp = task.employer || {};
+      const lines = [
+        `Hi ${firstName}! You have a new job offer from BeyondX.`,
+        '',
+        `Job: ${task.taskType}`,
+        task.description ? `Details: ${task.description}` : null,
+        task.location   ? `Location: ${task.location}` : null,
+        task.duration   ? `Duration: ${task.duration}` : null,
+        `Your pay: GH\u20b5 ${workerCut}`,
+        offerExpiresAt  ? `This offer expires ${offerExpiresAt.toLocaleString('en-GB', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' })}.` : null,
+        '',
+        `Employer: ${emp.orgName || 'BeyondX employer'}`,
+        emp.contactPerson ? `Contact: ${emp.contactPerson}` : null,
+        emp.phone         ? `Phone: ${emp.phone}` : null,
+        '',
+        'This job needs multiple workers — first to accept get it. Open your BeyondX Worker Dashboard at beyondxco.com now to accept or decline.',
+        '',
+        '- The BeyondX Team',
+      ].filter(Boolean).join('\n');
+      sendSMS(task.acceptedBy.phone, lines);
+    }
+
+    res.json({ ok: true, groupId, tasksCreated: created.length });
+  } catch (err) {
+    console.error('[admin] dispatch-multi failed:', err.message);
+    res.status(500).json({ error: err.message || 'Server error' });
   }
 });
 

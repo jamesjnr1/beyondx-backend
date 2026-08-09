@@ -26,6 +26,25 @@ function categoryForTaskType(taskType) {
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
 
+// Offer expiry — checked lazily on read rather than via a cron job, since
+// none is configured for this project on Railway. Any 'offered' task whose
+// offerExpiresAt has passed moves to 'expired' — a distinct, visible status
+// rather than silently reverting to 'open', so admin can see exactly which
+// offer timed out and to whom, then decide whether to redispatch. Cheap to
+// call on every relevant read — it's a single indexed updateMany that does
+// nothing when there's nothing to expire.
+async function expireStaleOffers() {
+  try {
+    await prisma.task.updateMany({
+      where: { status: 'offered', offerExpiresAt: { lt: new Date() } },
+      data: { status: 'expired', workerId: null },
+    });
+  } catch (err) {
+    console.error('[expireStaleOffers] failed:', err.message);
+  }
+}
+module.exports.expireStaleOffers = expireStaleOffers;
+
 function authEmployer(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'No token' });
@@ -69,7 +88,7 @@ function authEitherParty(req, res, next) {
 // for them via the dispatch flow), the task is assigned directly to that
 // worker instead of being left open, and the worker gets a confirmation SMS.
 router.post('/', authEmployer, async (req, res) => {
-  const { taskType, description, location, duration, pay, workerId, paymentRef } = req.body;
+  const { taskType, description, location, duration, pay, workerId, paymentRef, workersNeeded } = req.body;
   if (!taskType || !location || !pay) return res.status(400).json({ error: 'taskType, location and pay are required' });
   try {
     if (workerId) {
@@ -88,6 +107,10 @@ router.post('/', authEmployer, async (req, res) => {
       location,
       duration: duration || '1 day',
       pay: parseFloat(pay),
+      // Recorded here as the employer's stated intent — admin sees this as
+      // the default slot count when actually dispatching to candidates via
+      // /admin/tasks/dispatch-multi (which creates the real offer group).
+      ...(workersNeeded && workersNeeded > 1 ? { slotsNeeded: parseInt(workersNeeded, 10) } : {}),
       ...(paymentRef ? { paymentRef } : {}),
     };
     if (workerId) {
@@ -157,6 +180,7 @@ router.get('/', async (req, res) => {
 // GET /api/tasks/all — employer sees all their tasks
 router.get('/all', authEmployer, async (req, res) => {
   try {
+    await expireStaleOffers();
     const tasks = await prisma.task.findMany({
       where: { employerId: req.employerId },
       include: { acceptedBy: { select: { fullName: true, workerId: true, phone: true } }, reviews: true },
@@ -171,6 +195,7 @@ router.get('/all', authEmployer, async (req, res) => {
 // GET /api/tasks/mine — worker sees their active task
 router.get('/mine', authWorker, async (req, res) => {
   try {
+    await expireStaleOffers();
     const tasks = await prisma.task.findMany({
       where: { workerId: req.workerId, status: { in: ['offered', 'accepted', 'pending_confirmation', 'employer_confirmed'] } },
       include: { employer: { select: { orgName: true, contactPerson: true, phone: true, address: true } }, reviews: true },
@@ -214,6 +239,29 @@ router.patch('/:id/accept-offer', authWorker, async (req, res) => {
       const workerFirstName = (task.acceptedBy?.fullName || 'The worker').split(' ')[0];
       const contactFirstName = (task.employer.contactPerson || '').split(' ')[0] || 'there';
       sendSMS(task.employer.phone, `Hi ${contactFirstName}, BeyondX here. ${workerFirstName} accepted the "${task.taskType}" task and will be dispatched as planned.`);
+    }
+
+    // Multi-worker slots: if this task is part of a group (job needing
+    // several people), check whether the group is now fully staffed. If so,
+    // withdraw the remaining un-accepted offers so those workers stop seeing
+    // it, and let the employer know the job is fully covered.
+    if (task.groupId && task.slotsNeeded) {
+      const siblings = await prisma.task.findMany({ where: { groupId: task.groupId } });
+      const acceptedCount = siblings.filter(s => ['accepted', 'pending_confirmation', 'employer_confirmed', 'completed'].includes(s.status)).length;
+      if (acceptedCount >= task.slotsNeeded) {
+        const stillOffered = siblings.filter(s => s.status === 'offered');
+        if (stillOffered.length) {
+          await prisma.task.updateMany({
+            where: { id: { in: stillOffered.map(s => s.id) } },
+            data: { status: 'cancelled', workerId: null },
+          });
+        }
+        const emp = await prisma.employer.findUnique({ where: { id: task.employerId }, select: { phone: true, contactPerson: true } });
+        if (emp?.phone) {
+          const contactFirstName = (emp.contactPerson || '').split(' ')[0] || 'there';
+          sendSMS(emp.phone, `Hi ${contactFirstName}, BeyondX here. Your "${task.taskType}" job is now fully staffed — all ${task.slotsNeeded} worker${task.slotsNeeded > 1 ? 's have' : ' has'} been confirmed.`);
+        }
+      }
     }
   } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
