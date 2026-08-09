@@ -162,6 +162,32 @@ router.post('/', authEmployer, async (req, res) => {
   }
 });
 
+// PATCH /api/tasks/:id/cancel — employer cancels their own posted task
+// while it's still searching for a worker. Only allowed before anyone has
+// actually committed to the job (open, or payment submitted but not yet
+// verified) — once a specific worker has been offered or accepted it,
+// cancelling needs a human in the loop (support/admin), not a self-serve
+// button, since someone may already be acting on it.
+router.patch('/:id/cancel', authEmployer, async (req, res) => {
+  try {
+    const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+    if (!task || task.employerId !== req.employerId) {
+      return res.status(404).json({ error: 'Task not found.' });
+    }
+    if (!['open', 'payment_pending'].includes(task.status)) {
+      return res.status(400).json({ error: 'This job can no longer be cancelled — a worker has already been matched to it. Contact support if you need to stop it.' });
+    }
+    const updated = await prisma.task.update({
+      where: { id: req.params.id },
+      data: { status: 'cancelled' },
+    });
+    res.json({ task: updated });
+  } catch (err) {
+    console.error('[tasks] cancel failed:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // GET /api/tasks — fetch open tasks for workers
 router.get('/', async (req, res) => {
   try {
