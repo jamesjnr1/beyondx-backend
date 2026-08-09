@@ -375,6 +375,45 @@ router.get('/sms-logs', adminAuth, async (req, res) => {
   }
 });
 
+// GET /admin/visitor-stats — self-hosted visitor -> signup conversion funnel.
+// Replaces Vercel Analytics for this specific question: how many people
+// look at the site, and how many of those actually register. Query param
+// ?days=N restricts to the last N days (default 30); omit or use 0 for all-time.
+router.get('/visitor-stats', adminAuth, async (req, res) => {
+  try {
+    const days = parseInt(req.query.days, 10) || 0;
+    const since = days > 0 ? new Date(Date.now() - days * 86400000) : null;
+    const dateFilter = since ? { firstSeenAt: { gte: since } } : {};
+
+    const [totalVisitors, converted, workerSignups, employerSignups, recent] = await Promise.all([
+      prisma.visitor.count({ where: dateFilter }),
+      prisma.visitor.count({ where: { ...dateFilter, convertedAt: { not: null } } }),
+      prisma.visitor.count({ where: { ...dateFilter, convertedAs: 'worker' } }),
+      prisma.visitor.count({ where: { ...dateFilter, convertedAs: 'employer' } }),
+      prisma.visitor.findMany({
+        where: dateFilter,
+        orderBy: { lastSeenAt: 'desc' },
+        take: 50,
+        select: {
+          visitorId: true, firstPath: true, referrer: true, firstSeenAt: true,
+          lastSeenAt: true, pageViews: true, convertedAt: true, convertedAs: true,
+        },
+      }),
+    ]);
+
+    const conversionRate = totalVisitors > 0 ? (converted / totalVisitors * 100) : 0;
+
+    res.json({
+      totalVisitors, converted, notConverted: totalVisitors - converted,
+      workerSignups, employerSignups, conversionRate,
+      recent,
+    });
+  } catch (err) {
+    console.error('[admin] visitor-stats failed:', err.message);
+    res.status(500).json({ error: err.message || 'Server error' });
+  }
+});
+
 // POST /admin/send-sms — lets an admin send a one-off custom SMS to any
 // phone number directly from the dashboard (e.g. following up with a
 // specific worker or employer outside the automated message flow).

@@ -10,6 +10,23 @@ const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma  = new PrismaClient({ adapter });
 const router  = express.Router();
 
+// Best-effort: link a registration back to the anonymous visitor record
+// that led to it, so the admin console can show a real visit -> signup
+// conversion rate. Never blocks or fails the registration itself — if the
+// visitor row doesn't exist (tracking blocked, ad blocker, etc.) this is
+// simply a no-op.
+async function markVisitorConverted(visitorId, role) {
+  if (!visitorId || typeof visitorId !== 'string') return;
+  try {
+    await prisma.visitor.update({
+      where: { visitorId },
+      data: { convertedAt: new Date(), convertedAs: role },
+    });
+  } catch {
+    // No matching visitor row — fine, just skip.
+  }
+}
+
 let resend = null;
 try {
   if (process.env.RESEND_API_KEY) {
@@ -240,7 +257,7 @@ router.post('/employer-login', async (req, res) => {
 // POST /api/auth/employer-register
 // Body: { email, password, orgName, contactPerson, phone, address, region }
 router.post('/employer-register', async (req, res) => {
-  const { email, password, orgName, contactPerson, phone, address, region } = req.body;
+  const { email, password, orgName, contactPerson, phone, address, region, visitorId } = req.body;
 
   if (!email || !password || !orgName) {
     return res.status(400).json({ error: 'Email, password and organisation name are required' });
@@ -285,6 +302,7 @@ router.post('/employer-register', async (req, res) => {
     });
 
     sendWelcomeEmail(employer.email, employer.orgName, employer.contactPerson);
+    markVisitorConverted(visitorId, 'employer');
 
   } catch (err) {
     console.error('Employer register error:', err);
@@ -294,7 +312,7 @@ router.post('/employer-register', async (req, res) => {
 
 // POST /api/auth/worker-register
 router.post('/worker-register', async (req, res) => {
-  const { fullName, phone, prisonFacility, skills, pin, guarantorName, guarantorPhone, guarantorRelationship } = req.body;
+  const { fullName, phone, prisonFacility, skills, pin, guarantorName, guarantorPhone, guarantorRelationship, visitorId } = req.body;
 
   if (!fullName || !pin) {
     return res.status(400).json({ error: 'Full name and PIN are required' });
@@ -394,6 +412,7 @@ router.post('/worker-register', async (req, res) => {
 });
 
 sendWelcomeSMS(worker.phone, worker.fullName);
+markVisitorConverted(visitorId, 'worker');
 
   } catch (err) {
     console.error('Worker register error:', err);
