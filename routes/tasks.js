@@ -210,10 +210,21 @@ router.get('/mine', authWorker, async (req, res) => {
 // PATCH /api/tasks/:id/accept — worker accepts a task
 router.patch('/:id/accept', authWorker, async (req, res) => {
   try {
-    const task = await prisma.task.update({
-      where: { id: req.params.id },
+    // Atomic claim: only succeeds if the task is still 'open' at the moment
+    // this exact query runs. Now that any worker can browse and accept open
+    // tasks, two people tapping Accept on the same job at the same time is
+    // a real scenario — updateMany with status in the WHERE clause means
+    // whichever request reaches Postgres first wins, and the second one's
+    // WHERE simply matches zero rows instead of silently overwriting the
+    // first worker's claim.
+    const result = await prisma.task.updateMany({
+      where: { id: req.params.id, status: 'open' },
       data: { status: 'accepted', workerId: req.workerId }
     });
+    if (result.count === 0) {
+      return res.status(409).json({ error: 'This job was just taken by another worker.' });
+    }
+    const task = await prisma.task.findUnique({ where: { id: req.params.id } });
     res.json({ task });
   } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
