@@ -259,8 +259,24 @@ router.patch('/:id/accept', authWorker, async (req, res) => {
 router.patch('/:id/accept-offer', authWorker, async (req, res) => {
   try {
     const existing = await prisma.task.findUnique({ where: { id: req.params.id } });
-    if (!existing || existing.workerId !== req.workerId || existing.status !== 'offered') {
-      return res.status(400).json({ error: 'This offer is no longer available to respond to.' });
+    // Specific, honest reasons instead of one generic message — this was
+    // confusing workers who could still see the offer on screen (their
+    // client hadn't refreshed since it changed server-side) with no way
+    // to tell whether it expired, got cancelled, or went to someone else.
+    if (!existing) {
+      return res.status(404).json({ error: 'This job no longer exists.' });
+    }
+    if (existing.status === 'expired') {
+      return res.status(409).json({ error: 'This offer has expired. Refresh your dashboard to see current jobs.', stale: true });
+    }
+    if (existing.status === 'cancelled') {
+      return res.status(409).json({ error: 'This job was cancelled by the employer.', stale: true });
+    }
+    if (existing.workerId !== req.workerId) {
+      return res.status(409).json({ error: 'This job has already been assigned to someone else. Refresh your dashboard to see current jobs.', stale: true });
+    }
+    if (existing.status !== 'offered') {
+      return res.status(409).json({ error: 'This offer is no longer available to respond to.', stale: true });
     }
     const task = await prisma.task.update({
       where: { id: req.params.id },
@@ -313,8 +329,20 @@ router.patch('/:id/decline-offer', authWorker, async (req, res) => {
       where: { id: req.params.id },
       include: { acceptedBy: { select: { fullName: true } }, employer: { select: { phone: true, contactPerson: true, orgName: true } } }
     });
-    if (!existing || existing.workerId !== req.workerId || existing.status !== 'offered') {
-      return res.status(400).json({ error: 'This offer is no longer available to respond to.' });
+    if (!existing) {
+      return res.status(404).json({ error: 'This job no longer exists.' });
+    }
+    if (existing.status === 'expired') {
+      return res.status(409).json({ error: 'This offer already expired.', stale: true });
+    }
+    if (existing.status === 'cancelled') {
+      return res.status(409).json({ error: 'This job was already cancelled by the employer.', stale: true });
+    }
+    if (existing.workerId !== req.workerId) {
+      return res.status(409).json({ error: 'This job is no longer assigned to you.', stale: true });
+    }
+    if (existing.status !== 'offered') {
+      return res.status(409).json({ error: 'This offer is no longer available to respond to.', stale: true });
     }
     const task = await prisma.task.update({
       where: { id: req.params.id },
