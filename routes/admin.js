@@ -55,7 +55,7 @@ router.get('/all', adminAuth, async (req, res) => {
 // PATCH /admin/tasks/:id/paid — mark worker as paid
 // PATCH /admin/tasks/:id/status — set task status directly (used by verify-payments flow)
 router.patch('/tasks/:id/status', adminAuth, async (req, res) => {
-  const { status, adminNote } = req.body;
+  const { status, adminNote, workerId } = req.body;
   const allowed = ['offered', 'payment_pending', 'payment_rejected', 'accepted', 'completed', 'pending_confirmation', 'employer_confirmed', 'open', 'cancelled', 'expired'];
   if (!status || !allowed.includes(status)) {
     return res.status(400).json({ error: `status must be one of: ${allowed.join(', ')}` });
@@ -66,6 +66,10 @@ router.patch('/tasks/:id/status', adminAuth, async (req, res) => {
       data: {
         status,
         ...(adminNote ? { adminNote } : {}),
+        // Lets admin assign a worker to a previously-unmatched 'open' task
+        // in the same call that moves it to 'offered' — otherwise the SMS
+        // below would fire with no worker attached.
+        ...(workerId ? { workerId } : {}),
       },
       include: {
         acceptedBy: { select: { fullName: true, phone: true } },
