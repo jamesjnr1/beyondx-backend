@@ -210,3 +210,26 @@ model SmsLog {
   errorDetail String?
   createdAt   DateTime @default(now())
 }
+
+// Self-hosted visitor tracking — replaces Vercel Analytics for the specific
+// question of "how many people look at the site vs actually register."
+// One row per anonymous visitor (identified by a client-generated UUID
+// stored in localStorage), upserted on every visit. When that same visitor
+// later registers as a worker or employer, the registration route links
+// back here so we can compute a real visit -> signup conversion rate,
+// not just separate visitor and signup counts.
+model Visitor {
+  id          String    @id @default(uuid())
+  visitorId   String    @unique
+  firstPath   String?
+  referrer    String?
+  userAgent   String?
+  firstSeenAt DateTime  @default(now())
+  lastSeenAt  DateTime  @default(now())
+  pageViews   Int       @default(1)
+  convertedAt DateTime?
+  convertedAs String?   // 'worker' | 'employer'
+
+  @@index([firstSeenAt])
+  @@index([convertedAt])
+}
