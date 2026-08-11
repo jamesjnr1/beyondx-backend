@@ -14,6 +14,7 @@ app.use('/admin', require('./routes/admin'));
 app.use('/api/tasks', require('./routes/tasks'));
 app.use('/api/verification', require('./routes/verification'));
 app.use('/api/track', require('./routes/track'));
+app.use('/api/leads', require('./routes/leads'));
 
 app.get('/', (req, res) => {
   res.json({ status: 'BeyondX API is running' });
