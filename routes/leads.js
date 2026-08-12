@@ -15,7 +15,7 @@ router.post('/', async (req, res) => {
   const { name, phone, interest, category, location, notes, source } = req.body || {};
   if (!name || !String(name).trim()) return res.status(400).json({ error: 'Name is required.' });
   if (!phone || !String(phone).trim()) return res.status(400).json({ error: 'Phone number is required.' });
-  if (!['worker', 'employer', 'curious'].includes(interest)) {
+  if (!['worker', 'employer', 'partner', 'curious'].includes(interest)) {
     return res.status(400).json({ error: 'interest must be worker, employer, or curious.' });
   }
   try {
