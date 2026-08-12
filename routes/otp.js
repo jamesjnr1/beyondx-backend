@@ -7,8 +7,8 @@ const { sendSMS } = require('../utils/sms');
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
 
-const CODE_TTL_MS = 10 * 60 * 1000;      // 10 minutes
-const RESEND_COOLDOWN_MS = 45 * 1000;    // 45 seconds between resends
+const CODE_TTL_MS = 15 * 60 * 1000;      // 15 minutes to enter the code
+const RESEND_COOLDOWN_MS = 15 * 1000;    // 15 seconds between resends (was 45s)
 
 function normalisePhone(raw) {
   let p = String(raw || '').replace(/[\s-]/g, '').replace(/^\+/, '');
@@ -49,7 +49,7 @@ router.post('/send', async (req, res) => {
       const age = Date.now() - new Date(existing.createdAt).getTime();
       if (age < RESEND_COOLDOWN_MS) {
         const waitSecs = Math.ceil((RESEND_COOLDOWN_MS - age) / 1000);
-        return res.status(429).json({ error: `Please wait ${waitSecs} seconds before requesting another code.` });
+        return res.status(429).json({ error: `Please wait ${waitSecs} second${waitSecs !== 1 ? 's' : ''} then tap resend again.` });
       }
     }
 
@@ -63,10 +63,26 @@ router.post('/send', async (req, res) => {
     });
 
     await sendSMS(
-      // Convert back to 0XX format for sendSMS which normalises its own way
       '0' + phone.slice(3),
-      `Your BeyondX verification code is ${code}. It expires in 10 minutes.\n\n- The BeyondX Team`
+      `BeyondX code: ${code}\nValid for 15 minutes.`
     );
+
+    // Check the SMS log to confirm it was actually sent (not silently failed)
+    // by reading the last SmsLog entry for this number. Surface the error if
+    // Arkesel rejected it (e.g. low balance, bad sender ID).
+    const lastLog = await prisma.smsLog.findFirst({
+      where: { phone: { contains: phone.slice(-9) } },
+      orderBy: { createdAt: 'desc' },
+    }).catch(() => null);
+    if (lastLog && lastLog.status === 'failed') {
+      console.error('[otp/send] SMS delivery failed:', lastLog.errorType, lastLog.errorDetail);
+      // Clean up the stored code so a retry doesn't hit the cooldown
+      await prisma.phoneOtp.delete({ where: { phone } }).catch(() => null);
+      const msg = lastLog.errorType === 'low_balance'
+        ? 'SMS delivery failed — please contact BeyondX support.'
+        : 'Could not send a code right now. Please try again in a moment.';
+      return res.status(502).json({ error: msg });
+    }
 
     return res.status(200).json({ ok: true });
   } catch (err) {
