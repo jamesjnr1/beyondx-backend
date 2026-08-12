@@ -16,6 +16,16 @@ function normalisePhone(raw) {
   return p;
 }
 
+// GET /api/otp/health — lets you verify the route is reachable and Prisma works
+router.get('/health', async (req, res) => {
+  try {
+    await prisma.phoneOtp.count();
+    res.json({ ok: true, message: 'OTP route is live and database table exists.' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, hint: 'The PhoneOtp table probably does not exist yet — run the migration SQL in Supabase.' });
+  }
+});
+
 // POST /api/otp/send  { phone }
 router.post('/send', async (req, res) => {
   const rawPhone = req.body?.phone;
@@ -28,7 +38,13 @@ router.post('/send', async (req, res) => {
 
   try {
     // Cooldown check — don't burn an SMS every time someone taps Resend
-    const existing = await prisma.phoneOtp.findUnique({ where: { phone } });
+    const existing = await prisma.phoneOtp.findUnique({ where: { phone } }).catch(err => {
+      // Table doesn't exist yet — migration not run
+      if (err.message.includes('does not exist') || err.code === 'P2021') {
+        throw new Error('PhoneOtp table missing — run the migration SQL in Supabase first.');
+      }
+      throw err;
+    });
     if (existing) {
       const age = Date.now() - new Date(existing.createdAt).getTime();
       if (age < RESEND_COOLDOWN_MS) {
