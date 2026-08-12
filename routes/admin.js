@@ -366,6 +366,32 @@ router.get('/workers', adminAuth, async (req, res) => {
 // GET /admin/sms-logs — recent SMS send attempts, for the admin dashboard
 // to surface delivery problems (especially a depleted Arkesel balance)
 // instead of these only being visible in Railway's server logs.
+// GET /admin/leads — everyone captured at events, newest first
+router.get('/leads', adminAuth, async (req, res) => {
+  try {
+    const leads = await prisma.lead.findMany({ orderBy: { createdAt: 'desc' } });
+    res.json({ leads });
+  } catch (err) {
+    console.error('[admin] fetch leads failed:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PATCH /admin/leads/:id — mark a lead as followed up (or un-mark it)
+router.patch('/leads/:id', adminAuth, async (req, res) => {
+  const { followedUp } = req.body;
+  try {
+    const lead = await prisma.lead.update({
+      where: { id: req.params.id },
+      data: { followedUp: !!followedUp },
+    });
+    res.json({ lead });
+  } catch (err) {
+    if (err.code === 'P2025') return res.status(404).json({ error: 'Lead not found.' });
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 router.get('/sms-logs', adminAuth, async (req, res) => {
   try {
     const logs = await prisma.smsLog.findMany({

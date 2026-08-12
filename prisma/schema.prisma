@@ -201,6 +201,26 @@ enum PayStatus {
   reversed
 }
 
+// Leads captured at events (market days, expos, etc.) — separate from real
+// Worker/Employer accounts since these are just interested people who gave
+// their contact info at a stand, not registered users yet. Staff follow up
+// afterward by phone/SMS to actually convert them.
+model Lead {
+  id         String   @id @default(uuid())
+  name       String
+  phone      String
+  interest   String   // 'worker' | 'employer' | 'curious'
+  category   String?  // skill category, only relevant if interest === 'worker'
+  location   String?
+  notes      String?
+  source     String   @default("market_day")
+  followedUp Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([followedUp])
+}
+
 model SmsLog {
   id          String   @id @default(uuid())
   phone       String
