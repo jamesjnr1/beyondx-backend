@@ -3,11 +3,11 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
 const { PrismaPg } = require('@prisma/adapter-pg');
+const { calcProximity } = require('../utils/proximity');
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma  = new PrismaClient({ adapter });
 const router  = express.Router();
-
 function authWorker(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'No token' });
@@ -30,6 +30,7 @@ const VALID_SKILLS = [
 // employers should be able to see the full pool and when someone frees up.
 router.get('/', async (req, res) => {
   try {
+    const { jobLocation } = req.query; // optional: ?jobLocation=Tema
     const workers = await prisma.worker.findMany({
       where: { isActive: true },
       select: {
@@ -46,6 +47,7 @@ router.get('/', async (req, res) => {
         gpsVerified:    true,
         prisonFacility: true,
         photoUrl:       true,
+        homeArea:       true,
         tasks: {
           where: { status: { in: ['offered', 'accepted', 'pending_confirmation'] } },
           select: { id: true }
@@ -60,20 +62,33 @@ router.get('/', async (req, res) => {
         }
       }
     });
-    // Flatten task->employer.orgName into a simple reviewerName field,
-    // and turn the active-task lookup into a simple isBusy flag.
-    const flattened = workers.map(w => ({
-      ...w,
-      isBusy: (w.tasks || []).length > 0,
-      tasks: undefined,
-      reviewsReceived: (w.reviewsReceived || []).map(r => ({
-        rating: r.rating,
-        comment: r.comment,
-        createdAt: r.createdAt,
-        taskType: r.task?.taskType || null,
-        reviewerName: r.task?.employer?.orgName || 'A BeyondX Employer'
-      }))
-    }));
+    const flattened = workers.map(w => {
+      const proximity = jobLocation
+        ? calcProximity(w.homeArea, jobLocation)
+        : { available: false };
+      return {
+        ...w,
+        isBusy: (w.tasks || []).length > 0,
+        tasks: undefined,
+        proximity,
+        reviewsReceived: (w.reviewsReceived || []).map(r => ({
+          rating: r.rating,
+          comment: r.comment,
+          createdAt: r.createdAt,
+          taskType: r.task?.taskType || null,
+          reviewerName: r.task?.employer?.orgName || 'A BeyondX Employer'
+        }))
+      };
+    });
+    // When jobLocation is provided, sort: nearby workers first, then by rating
+    if (jobLocation) {
+      flattened.sort((a, b) => {
+        const da = a.proximity?.roadKm ?? 9999;
+        const db = b.proximity?.roadKm ?? 9999;
+        if (da !== db) return da - db;
+        return (Number(b.rating) || 0) - (Number(a.rating) || 0);
+      });
+    }
     res.json({ workers: flattened });
   } catch (err) {
     console.error('Fetch workers error:', err);
@@ -111,8 +126,11 @@ router.get('/me', authWorker, async (req, res) => {
 // guarantor details here — those go through support, to keep identity
 // verification meaningful.
 router.patch('/me', authWorker, async (req, res) => {
-  const { skills, bio, photoUrl } = req.body;
+  const { skills, bio, photoUrl, homeArea } = req.body;
   const data = {};
+  if (homeArea !== undefined) {
+    data.homeArea = typeof homeArea === 'string' ? homeArea.trim().slice(0, 200) : null;
+  }
   if (skills !== undefined) {
     if (!Array.isArray(skills) || skills.length === 0) {
       return res.status(400).json({ error: 'Select at least one skill.' });

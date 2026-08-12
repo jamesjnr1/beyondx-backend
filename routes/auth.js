@@ -312,7 +312,7 @@ router.post('/employer-register', async (req, res) => {
 
 // POST /api/auth/worker-register
 router.post('/worker-register', async (req, res) => {
-  const { fullName, phone, prisonFacility, skills, pin, guarantorName, guarantorPhone, guarantorRelationship, visitorId } = req.body;
+  const { fullName, phone, prisonFacility, skills, pin, guarantorName, guarantorPhone, guarantorRelationship, visitorId, homeArea } = req.body;
 
   if (!fullName || !pin) {
     return res.status(400).json({ error: 'Full name and PIN are required' });
@@ -375,7 +375,8 @@ router.post('/worker-register', async (req, res) => {
             totalEarned:   0,
             guarantorName,
             guarantorPhone,
-            guarantorRelationship: guarantorRelationship || null
+            guarantorRelationship: guarantorRelationship || null,
+            homeArea: homeArea ? homeArea.trim() : null,
           }
         });
         break; // success

@@ -4,6 +4,7 @@ const { PrismaClient } = require('@prisma/client');
 const { PrismaPg } = require('@prisma/adapter-pg');
 const { sendSMS } = require('../utils/sms');
 const { expireStaleOffers } = require('./tasks');
+const { calcProximity } = require('../utils/proximity');
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
@@ -61,15 +62,25 @@ router.patch('/tasks/:id/status', adminAuth, async (req, res) => {
     return res.status(400).json({ error: `status must be one of: ${allowed.join(', ')}` });
   }
   try {
+    // Auto-compute transport allowance when assigning a worker to a task.
+    let transportAllowance = undefined;
+    if (status === 'offered' && workerId) {
+      const [existingTask, worker] = await Promise.all([
+        prisma.task.findUnique({ where: { id: req.params.id }, select: { location: true } }),
+        prisma.worker.findUnique({ where: { id: workerId }, select: { homeArea: true } }),
+      ]);
+      if (existingTask && worker) {
+        const prox = calcProximity(worker.homeArea, existingTask.location);
+        if (prox.available) transportAllowance = prox.transportAllowance;
+      }
+    }
     const task = await prisma.task.update({
       where: { id: req.params.id },
       data: {
         status,
         ...(adminNote ? { adminNote } : {}),
-        // Lets admin assign a worker to a previously-unmatched 'open' task
-        // in the same call that moves it to 'offered' — otherwise the SMS
-        // below would fire with no worker attached.
         ...(workerId ? { workerId } : {}),
+        ...(transportAllowance !== undefined ? { transportAllowance } : {}),
       },
       include: {
         acceptedBy: { select: { fullName: true, phone: true } },
@@ -342,6 +353,9 @@ router.get('/workers', adminAuth, async (req, res) => {
         photoUrl:       true,
         guarantorName:  true,
         guarantorPhone: true,
+        homeArea:       true,
+        homeLat:        true,
+        homeLng:        true,
         guarantorRelationship: true,
         createdAt:      true,
         tasks: {

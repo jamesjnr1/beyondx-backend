@@ -32,6 +32,9 @@ model Worker {
   guarantorRelationship String?
   lastActiveAt          DateTime? @default(now())
   photoUrl              String?
+  homeArea              String?    // neighbourhood/area, e.g. "Madina, Accra"
+  homeLat               Float?     // approximate, from area lookup or GPS
+  homeLng               Float?
   createdAt      DateTime     @default(now())
   dispatches     Dispatch[]
   ussdSessions   UssdSession[]
@@ -131,6 +134,9 @@ model Task {
   // lazily on read (see expireStaleOffers in routes/tasks.js) rather than
   // via a cron job, since Railway has none configured for this project.
   offerExpiresAt DateTime?
+  // Transport allowance — added to employer total when worker lives far from
+  // the job location. The worker receives this on top of their full pay.
+  transportAllowance Int?    @default(0)
 
   @@index([groupId])
 }
