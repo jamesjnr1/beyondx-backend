@@ -207,6 +207,17 @@ enum PayStatus {
   reversed
 }
 
+// Phone OTP verification — one row per phone number being verified.
+// Stored on Railway instead of Supabase so we don't need a separate
+// SUPABASE_SERVICE_KEY env var on Vercel. Primary key is phone so an
+// upsert naturally replaces any previous code for the same number.
+model PhoneOtp {
+  phone     String   @id
+  code      String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
 // Leads captured at events (market days, expos, etc.) — separate from real
 // Worker/Employer accounts since these are just interested people who gave
 // their contact info at a stand, not registered users yet. Staff follow up
