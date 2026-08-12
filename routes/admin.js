@@ -473,6 +473,48 @@ router.post('/send-sms', adminAuth, async (req, res) => {
   }
 });
 
+// POST /admin/blast-location-request — sends a one-time SMS to every active
+// worker who has NOT yet set their homeArea, asking them to log in and add
+// their neighbourhood so the proximity matching system can work for them.
+router.post('/blast-location-request', adminAuth, async (req, res) => {
+  try {
+    const workers = await prisma.worker.findMany({
+      where: { isActive: true, OR: [{ homeArea: null }, { homeArea: '' }] },
+      select: { id: true, fullName: true, phone: true }
+    });
+    if (workers.length === 0) {
+      return res.json({ sent: 0, message: 'All active workers already have a home area set.' });
+    }
+    let sent = 0, failed = 0;
+    for (const w of workers) {
+      if (!w.phone) { failed++; continue; }
+      const firstName = (w.fullName || 'there').split(' ')[0];
+      const msg = [
+        `Hi ${firstName}! BeyondX here.`,
+        '',
+        `We have a new feature — we now match you to jobs near where you live, and add a transport allowance to your pay when a job is far from you.`,
+        '',
+        `To get this benefit, please log in to your BeyondX dashboard and add your home area (e.g. "Madina" or "Tema"):`,
+        `beyondxco.com`,
+        '',
+        `- The BeyondX Team`
+      ].join('\n');
+      try {
+        await sendSMS(w.phone, msg);
+        sent++;
+        // Small delay to avoid hitting Arkesel rate limits
+        await new Promise(r => setTimeout(r, 120));
+      } catch {
+        failed++;
+      }
+    }
+    res.json({ sent, failed, total: workers.length });
+  } catch (err) {
+    console.error('[blast-location-request] failed:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // POST /admin/send-dormant-reminders — finds workers who haven't logged in
 // for 7+ days and texts them a reminder to stay visible to employers.
 // Can be triggered manually from the dashboard, or on a schedule via an

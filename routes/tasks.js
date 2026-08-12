@@ -223,7 +223,7 @@ router.get('/mine', authWorker, async (req, res) => {
   try {
     await expireStaleOffers();
     const tasks = await prisma.task.findMany({
-      where: { workerId: req.workerId, status: { in: ['offered', 'accepted', 'pending_confirmation', 'employer_confirmed'] } },
+      where: { workerId: req.workerId, status: { in: ['offered', 'accepted', 'pending_confirmation', 'payment_pending', 'employer_confirmed'] } },
       include: { employer: { select: { orgName: true, contactPerson: true, phone: true, address: true } }, reviews: true },
       orderBy: { createdAt: 'desc' }
     });
