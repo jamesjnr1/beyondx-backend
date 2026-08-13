@@ -106,7 +106,7 @@ router.get('/me', authWorker, async (req, res) => {
         skills: true, bio: true, dailyCharge: true, rating: true,
         tasksCompleted: true, totalEarned: true, gpsVerified: true,
         guarantorName: true, guarantorPhone: true, guarantorRelationship: true,
-        photoUrl: true,
+        photoUrl: true, homeArea: true,
         reviewsReceived: {
           where: { fromRole: 'employer' },
           select: { rating: true, comment: true, createdAt: true },
