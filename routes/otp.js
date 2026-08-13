@@ -124,7 +124,7 @@ router.post('/verify', async (req, res) => {
     const resp = await fetch(`${ARKESEL_BASE}/otp/verify`, {
       method: 'POST',
       headers: { 'api-key': process.env.ARKESEL_API_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ number: '+' + phone, otp_code: code }),
+      body: JSON.stringify({ number: '+' + phone, code: code }),
     });
 
     const data = await resp.json().catch(() => ({}));
