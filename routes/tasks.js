@@ -353,7 +353,7 @@ router.patch('/:id/decline-offer', authWorker, async (req, res) => {
     if (existing.employer?.phone) {
       const workerFirstName = (existing.acceptedBy?.fullName || 'The worker').split(' ')[0];
       const contactFirstName = (existing.employer.contactPerson || '').split(' ')[0] || 'there';
-      const message = `Hi ${contactFirstName}, BeyondX here. ${workerFirstName} declined the "${existing.taskType}" task. It's back in the open pool, or you can dispatch a different worker directly from your dashboard.`;
+      const message = `BeyondX: Hi ${contactFirstName}, ${workerFirstName} declined "${existing.taskType}". We'll find another worker. Check your dashboard.`;
       sendSMS(existing.employer.phone, message);
     }
   } catch (err) { res.status(500).json({ error: 'Server error' }); }

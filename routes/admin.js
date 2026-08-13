@@ -88,30 +88,12 @@ router.patch('/tasks/:id/status', adminAuth, async (req, res) => {
       }
     });
 
-    // When payment is verified and status advances to 'offered',
-    // send the worker a full job offer SMS with all details.
+    // Job offer SMS — kept to 1 segment (≤160 chars) so it delivers on all networks
     if (status === 'offered' && task.acceptedBy?.phone) {
       const firstName = (task.acceptedBy.fullName || '').split(' ')[0] || 'there';
       const workerCut = Number(task.pay || 0).toFixed(0);
-      const emp = task.employer || {};
-      const lines = [
-        `Hi ${firstName}! You have a new job offer from BeyondX.`,
-        '',
-        `Job: ${task.taskType}`,
-        task.description ? `Details: ${task.description}` : null,
-        task.location   ? `Location: ${task.location}` : null,
-        task.duration   ? `Duration: ${task.duration}` : null,
-        `Your pay: GH\u20b5 ${workerCut}`,
-        '',
-        `Employer: ${emp.orgName || 'BeyondX employer'}`,
-        emp.contactPerson ? `Contact: ${emp.contactPerson}` : null,
-        emp.phone         ? `Phone: ${emp.phone}` : null,
-        '',
-        'Open your BeyondX Worker Dashboard at beyondxco.com to accept or decline.',
-        '',
-        '- The BeyondX Team',
-      ].filter(Boolean).join('\n');
-      sendSMS(task.acceptedBy.phone, lines);
+      const sms = `BeyondX: Hi ${firstName}, new job! ${task.taskType} at ${task.location||'TBD'}, ${task.duration||''}. Pay: GH${workerCut}. Accept/decline: beyondxco.com`;
+      sendSMS(task.acceptedBy.phone, sms);
     }
 
     res.json({ ok: true, task });
@@ -190,31 +172,13 @@ router.post('/tasks/dispatch-multi', adminAuth, async (req, res) => {
       await prisma.task.update({ where: { id: sourceTaskId }, data: { status: 'cancelled', adminNote: 'Superseded by multi-worker dispatch.' } }).catch(() => null);
     }
 
-    // Notify every candidate worker — same template as the single-worker offer.
+    // Notify every candidate worker — 1 segment max so it delivers on all networks
     for (const task of created) {
       if (!task.acceptedBy?.phone) continue;
       const firstName = (task.acceptedBy.fullName || '').split(' ')[0] || 'there';
       const workerCut = Number(task.pay || 0).toFixed(0);
-      const emp = task.employer || {};
-      const lines = [
-        `Hi ${firstName}! You have a new job offer from BeyondX.`,
-        '',
-        `Job: ${task.taskType}`,
-        task.description ? `Details: ${task.description}` : null,
-        task.location   ? `Location: ${task.location}` : null,
-        task.duration   ? `Duration: ${task.duration}` : null,
-        `Your pay: GH\u20b5 ${workerCut}`,
-        offerExpiresAt  ? `This offer expires ${offerExpiresAt.toLocaleString('en-GB', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' })}.` : null,
-        '',
-        `Employer: ${emp.orgName || 'BeyondX employer'}`,
-        emp.contactPerson ? `Contact: ${emp.contactPerson}` : null,
-        emp.phone         ? `Phone: ${emp.phone}` : null,
-        '',
-        'This job needs multiple workers — first to accept get it. Open your BeyondX Worker Dashboard at beyondxco.com now to accept or decline.',
-        '',
-        '- The BeyondX Team',
-      ].filter(Boolean).join('\n');
-      sendSMS(task.acceptedBy.phone, lines);
+      const sms = `BeyondX: Hi ${firstName}, new job! ${task.taskType} at ${task.location||'TBD'}, ${task.duration||''}. Pay: GH${workerCut}. First to accept wins: beyondxco.com`;
+      sendSMS(task.acceptedBy.phone, sms);
     }
 
     res.json({ ok: true, groupId, tasksCreated: created.length });
