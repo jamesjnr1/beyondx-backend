@@ -206,6 +206,122 @@ router.post('/worker-login', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
+// POST /api/auth/worker-reset-pin
+// Worker forgot their PIN — verify phone via OTP then set a new PIN.
+// Uses the same PhoneOtp table as registration so no new infrastructure needed.
+router.post('/worker-reset-pin', async (req, res) => {
+  const { phone, code, newPin } = req.body;
+  if (!phone || !code || !newPin) {
+    return res.status(400).json({ error: 'Phone, code and new PIN are required.' });
+  }
+  if (!/^\d{4,6}$/.test(newPin)) {
+    return res.status(400).json({ error: 'PIN must be 4-6 digits.' });
+  }
+  try {
+    // Verify OTP inline (same logic as /api/otp/verify)
+    let digits = phone.replace(/[\s\-]/g, '').replace(/^\+/, '');
+    if (digits.startsWith('0')) digits = '233' + digits.slice(1);
+    const normPhone = digits;
+    const row = await prisma.phoneOtp.findUnique({ where: { phone: normPhone } });
+    if (!row) return res.status(400).json({ error: 'No code found. Please request a new one.' });
+    if (new Date(row.expiresAt) < new Date()) {
+      await prisma.phoneOtp.delete({ where: { phone: normPhone } }).catch(() => null);
+      return res.status(400).json({ error: 'Code expired. Request a new one.' });
+    }
+    if (row.code !== String(code).trim()) {
+      return res.status(400).json({ error: 'Incorrect code.' });
+    }
+    await prisma.phoneOtp.delete({ where: { phone: normPhone } }).catch(() => null);
+
+    // Find and update the worker
+    const worker = await prisma.worker.findFirst({ where: { phone: { contains: phone.replace(/[\s\-]/g, '').slice(-9) } } });
+    if (!worker) return res.status(404).json({ error: 'No worker found with that phone number.' });
+    const pinHash = await bcrypt.hash(newPin, 12);
+    await prisma.worker.update({ where: { id: worker.id }, data: { pinHash } });
+    res.json({ ok: true, message: 'PIN updated. You can now log in with your new PIN.' });
+  } catch (err) {
+    console.error('Worker reset PIN error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/auth/employer-forgot-password  { email }
+// Sends a 6-digit reset code to the employer's registered email.
+router.post('/employer-forgot-password', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email is required.' });
+  try {
+    const employer = await prisma.employer.findUnique({ where: { email: email.toLowerCase().trim() } });
+    // Always respond ok so we don't reveal which emails are registered
+    if (!employer) return res.json({ ok: true });
+
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+    // Reuse PhoneOtp table keyed on email instead of phone
+    await prisma.phoneOtp.upsert({
+      where:  { phone: email.toLowerCase().trim() },
+      update: { code, expiresAt, createdAt: new Date() },
+      create: { phone: email.toLowerCase().trim(), code, expiresAt },
+    });
+
+    // Send via email
+    sendWelcomeEmail && await sendWelcomeEmail(
+      employer.email,
+      `Your BeyondX reset code is: ${code}\n\nThis code expires in 15 minutes. If you didn't request this, ignore it.`,
+      'BeyondX — Password Reset'
+    ).catch(() => null);
+
+    // Also try Resend if available
+    if (resend) {
+      resend.emails.send({
+        from: 'BeyondX <noreply@beyondxco.com>',
+        to: employer.email,
+        subject: 'Your BeyondX password reset code',
+        text: `Your BeyondX password reset code is: ${code}\n\nThis code expires in 15 minutes.\n\nIf you didn't request a password reset, you can ignore this email.\n\n— The BeyondX Team`,
+      }).catch(() => null);
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Employer forgot password error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/auth/employer-reset-password  { email, code, newPassword }
+router.post('/employer-reset-password', async (req, res) => {
+  const { email, code, newPassword } = req.body;
+  if (!email || !code || !newPassword) {
+    return res.status(400).json({ error: 'Email, code and new password are required.' });
+  }
+  if (newPassword.length < 6) {
+    return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+  }
+  try {
+    const key = email.toLowerCase().trim();
+    const row = await prisma.phoneOtp.findUnique({ where: { phone: key } });
+    if (!row) return res.status(400).json({ error: 'No reset code found. Please request a new one.' });
+    if (new Date(row.expiresAt) < new Date()) {
+      await prisma.phoneOtp.delete({ where: { phone: key } }).catch(() => null);
+      return res.status(400).json({ error: 'Code expired. Request a new one.' });
+    }
+    if (row.code !== String(code).trim()) {
+      return res.status(400).json({ error: 'Incorrect code.' });
+    }
+    await prisma.phoneOtp.delete({ where: { phone: key } }).catch(() => null);
+
+    const employer = await prisma.employer.findUnique({ where: { email: key } });
+    if (!employer) return res.status(404).json({ error: 'Account not found.' });
+    const passwordHash = await bcrypt.hash(newPassword, 12);
+    await prisma.employer.update({ where: { id: employer.id }, data: { passwordHash } });
+    res.json({ ok: true, message: 'Password updated. You can now log in.' });
+  } catch (err) {
+    console.error('Employer reset password error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // ── EMPLOYER LOGIN ────────────────────────────
 // POST /api/auth/employer-login
 // Body: { email, password }

@@ -7,22 +7,23 @@ const { sendSMS } = require('../utils/sms');
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
 
-const CODE_TTL_MS = 15 * 60 * 1000;      // 15 minutes to enter the code
-const RESEND_COOLDOWN_MS = 15 * 1000;    // 15 seconds between resends (was 45s)
+const CODE_TTL_MS      = 15 * 60 * 1000;  // 15 minutes
+const RESEND_COOLDOWN  = 15 * 1000;        // 15 seconds
 
 function normalisePhone(raw) {
-  let p = String(raw || '').replace(/[\s-]/g, '').replace(/^\+/, '');
+  let p = String(raw || '').replace(/[\s\-]/g, '').replace(/^\+/, '');
   if (p.startsWith('0')) p = '233' + p.slice(1);
+  if (!p.startsWith('233')) p = '233' + p;
   return p;
 }
 
-// GET /api/otp/health — lets you verify the route is reachable and Prisma works
+// GET /api/otp/health
 router.get('/health', async (req, res) => {
   try {
     await prisma.phoneOtp.count();
     res.json({ ok: true, message: 'OTP route is live and database table exists.' });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message, hint: 'The PhoneOtp table probably does not exist yet — run the migration SQL in Supabase.' });
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
@@ -33,23 +34,17 @@ router.post('/send', async (req, res) => {
 
   const phone = normalisePhone(rawPhone);
   if (!/^233\d{9}$/.test(phone)) {
-    return res.status(400).json({ error: 'Please enter a valid Ghana phone number (e.g. 024XXXXXXX).' });
+    return res.status(400).json({ error: 'Enter a valid Ghana number (e.g. 024XXXXXXX).' });
   }
 
   try {
-    // Cooldown check — don't burn an SMS every time someone taps Resend
-    const existing = await prisma.phoneOtp.findUnique({ where: { phone } }).catch(err => {
-      // Table doesn't exist yet — migration not run
-      if (err.message.includes('does not exist') || err.code === 'P2021') {
-        throw new Error('PhoneOtp table missing — run the migration SQL in Supabase first.');
-      }
-      throw err;
-    });
+    // Cooldown check
+    const existing = await prisma.phoneOtp.findUnique({ where: { phone } });
     if (existing) {
       const age = Date.now() - new Date(existing.createdAt).getTime();
-      if (age < RESEND_COOLDOWN_MS) {
-        const waitSecs = Math.ceil((RESEND_COOLDOWN_MS - age) / 1000);
-        return res.status(429).json({ error: `Please wait ${waitSecs} second${waitSecs !== 1 ? 's' : ''} then tap resend again.` });
+      if (age < RESEND_COOLDOWN) {
+        const wait = Math.ceil((RESEND_COOLDOWN - age) / 1000);
+        return res.status(429).json({ error: `Wait ${wait}s then try again.` });
       }
     }
 
@@ -57,67 +52,38 @@ router.post('/send', async (req, res) => {
     const expiresAt = new Date(Date.now() + CODE_TTL_MS);
 
     await prisma.phoneOtp.upsert({
-      where: { phone },
+      where:  { phone },
       update: { code, expiresAt, createdAt: new Date() },
       create: { phone, code, expiresAt },
     });
 
-    await sendSMS(
-      '0' + phone.slice(3),
-      `BeyondX code: ${code}\nValid for 15 minutes.`
-    );
-
-    // Check the SMS log to confirm it was actually sent (not silently failed)
-    // by reading the last SmsLog entry for this number. Surface the error if
-    // Arkesel rejected it (e.g. low balance, bad sender ID).
-    const lastLog = await prisma.smsLog.findFirst({
-      where: { phone: { contains: phone.slice(-9) } },
-      orderBy: { createdAt: 'desc' },
-    }).catch(() => null);
-    if (lastLog && lastLog.status === 'failed') {
-      console.error('[otp/send] SMS delivery failed:', lastLog.errorType, lastLog.errorDetail);
-      // Clean up the stored code so a retry doesn't hit the cooldown
-      await prisma.phoneOtp.delete({ where: { phone } }).catch(() => null);
-      const msg = lastLog.errorType === 'low_balance'
-        ? 'SMS delivery failed — please contact BeyondX support.'
-        : 'Could not send a code right now. Please try again in a moment.';
-      return res.status(502).json({ error: msg });
-    }
+    // Send SMS — fire and forget, never block or fail the response on this
+    const displayPhone = '0' + phone.slice(3);
+    sendSMS(displayPhone, `BeyondX code: ${code}\nValid 15 mins.`).catch(() => null);
 
     return res.status(200).json({ ok: true });
   } catch (err) {
-    console.error('[otp/send] error:', err.message);
-    return res.status(500).json({ error: 'Could not send a code right now. Please try again.' });
+    console.error('[otp/send]', err.message);
+    return res.status(500).json({ error: 'Could not send a code. Please try again.' });
   }
 });
 
 // POST /api/otp/verify  { phone, code }
 router.post('/verify', async (req, res) => {
   const phone = normalisePhone(req.body?.phone);
-  const code = String(req.body?.code || '').trim();
-
-  if (!phone || !code) return res.status(400).json({ error: 'Phone and code are required.' });
+  const code  = String(req.body?.code || '').trim();
+  if (!phone || !code) return res.status(400).json({ error: 'Phone and code required.' });
 
   try {
     const row = await prisma.phoneOtp.findUnique({ where: { phone } });
-
-    if (!row) {
-      return res.status(400).json({ error: 'No code found for this number. Please request a new one.' });
-    }
-    if (new Date(row.expiresAt).getTime() < Date.now()) {
-      await prisma.phoneOtp.delete({ where: { phone } }).catch(() => null);
-      return res.status(400).json({ error: 'That code has expired. Please request a new one.' });
-    }
-    if (row.code !== code) {
-      return res.status(400).json({ error: 'Incorrect code. Please check and try again.' });
-    }
-
-    // One-time use — delete it
+    if (!row)                                         return res.status(400).json({ error: 'No code found. Please request a new one.' });
+    if (new Date(row.expiresAt) < new Date())         { await prisma.phoneOtp.delete({ where: { phone } }).catch(() => null); return res.status(400).json({ error: 'Code expired. Request a new one.' }); }
+    if (row.code !== code)                            return res.status(400).json({ error: 'Incorrect code. Check and try again.' });
     await prisma.phoneOtp.delete({ where: { phone } }).catch(() => null);
     return res.status(200).json({ ok: true });
   } catch (err) {
-    console.error('[otp/verify] error:', err.message);
-    return res.status(500).json({ error: 'Could not verify that code right now.' });
+    console.error('[otp/verify]', err.message);
+    return res.status(500).json({ error: 'Could not verify. Please try again.' });
   }
 });
 
