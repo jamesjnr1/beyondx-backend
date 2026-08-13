@@ -130,6 +130,7 @@ model Task {
   // tell how many total slots the posting needs without a second query.
   groupId        String?
   slotsNeeded    Int?
+  filledSlots    Int       @default(0)  // tracks how many workers accepted so far
   // Offer expiry: set when a task is dispatched with a time limit. Checked
   // lazily on read (see expireStaleOffers in routes/tasks.js) rather than
   // via a cron job, since Railway has none configured for this project.

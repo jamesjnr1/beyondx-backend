@@ -196,7 +196,14 @@ router.get('/', async (req, res) => {
       include: { employer: { select: { orgName: true, contactPerson: true, phone: true, address: true } } },
       orderBy: { createdAt: 'desc' }
     });
-    res.json({ tasks });
+    // Attach remaining slots so the worker dashboard can show "2 of 3 spots left"
+    const withSlots = tasks.map(t => ({
+      ...t,
+      slotsNeeded: t.slotsNeeded || 1,
+      filledSlots: t.filledSlots || 0,
+      slotsRemaining: (t.slotsNeeded || 1) - (t.filledSlots || 0),
+    }));
+    res.json({ tasks: withSlots });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });
@@ -233,25 +240,34 @@ router.get('/mine', authWorker, async (req, res) => {
   }
 });
 
-// PATCH /api/tasks/:id/accept — worker accepts a task
+// PATCH /api/tasks/:id/accept — worker accepts an open task
 router.patch('/:id/accept', authWorker, async (req, res) => {
   try {
-    // Atomic claim: only succeeds if the task is still 'open' at the moment
-    // this exact query runs. Now that any worker can browse and accept open
-    // tasks, two people tapping Accept on the same job at the same time is
-    // a real scenario — updateMany with status in the WHERE clause means
-    // whichever request reaches Postgres first wins, and the second one's
-    // WHERE simply matches zero rows instead of silently overwriting the
-    // first worker's claim.
+    const existing = await prisma.task.findUnique({ where: { id: req.params.id } });
+    if (!existing || existing.status !== 'open') {
+      return res.status(409).json({ error: 'This job was just taken by another worker.', stale: true });
+    }
+
+    const slots = existing.slotsNeeded || 1;
+    const filled = (existing.filledSlots || 0) + 1;
+    const nowFull = filled >= slots;
+
+    // Atomic: only update if still open (race-condition safe)
     const result = await prisma.task.updateMany({
       where: { id: req.params.id, status: 'open' },
-      data: { status: 'accepted', workerId: req.workerId }
+      data: {
+        // Stay 'open' until ALL slots filled so other workers can still accept
+        status: nowFull ? 'accepted' : 'open',
+        filledSlots: filled,
+        // Only set workerId on the final accepting worker (or single-slot jobs)
+        ...(nowFull ? { workerId: req.workerId } : {}),
+      }
     });
     if (result.count === 0) {
-      return res.status(409).json({ error: 'This job was just taken by another worker.' });
+      return res.status(409).json({ error: 'This job was just taken by another worker.', stale: true });
     }
     const task = await prisma.task.findUnique({ where: { id: req.params.id } });
-    res.json({ task });
+    res.json({ task, filled, slots, full: nowFull });
   } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
