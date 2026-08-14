@@ -190,12 +190,28 @@ router.patch('/:id/cancel', authEmployer, async (req, res) => {
 // GET /api/tasks — fetch open tasks for workers
 router.get('/', async (req, res) => {
   try {
+    // Get the worker's ID from token if present (optional auth)
+    let currentWorkerId = null;
+    try {
+      const token = req.headers.authorization?.split(' ')[1];
+      if (token) {
+        const jwt = require('jsonwebtoken');
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        if (decoded.role === 'worker') currentWorkerId = decoded.id;
+      }
+    } catch { /* unauthenticated is fine */ }
+
     const tasks = await prisma.task.findMany({
-      where: { status: 'open' },
+      where: {
+        status: 'open',
+        // For multi-slot tasks, hide ones the current worker already accepted
+        ...(currentWorkerId ? {
+          NOT: { groupId: null, workerId: currentWorkerId }
+        } : {}),
+      },
       include: { employer: { select: { orgName: true, contactPerson: true, phone: true, address: true } } },
       orderBy: { createdAt: 'desc' }
     });
-    // Attach remaining slots so the worker dashboard can show "2 of 3 spots left"
     const withSlots = tasks.map(t => ({
       ...t,
       slotsNeeded: t.slotsNeeded || 1,
@@ -209,16 +225,33 @@ router.get('/', async (req, res) => {
   }
 });
 
-// GET /api/tasks/all — employer sees all their tasks
+// GET /api/tasks/all — employer sees their tasks (originals only, not worker clone rows)
 router.get('/all', authEmployer, async (req, res) => {
   try {
     await expireStaleOffers();
     const tasks = await prisma.task.findMany({
-      where: { employerId: req.employerId },
-      include: { acceptedBy: { select: { fullName: true, workerId: true, phone: true } }, reviews: true },
+      where: {
+        employerId: req.employerId,
+        groupId: null,  // exclude personal worker rows (they have groupId = parent task id)
+      },
+      include: {
+        acceptedBy: { select: { fullName: true, workerId: true, phone: true } },
+        reviews: true,
+      },
       orderBy: { createdAt: 'desc' }
     });
-    res.json({ tasks });
+
+    // For multi-slot tasks, attach the list of workers who've accepted
+    const withWorkers = await Promise.all(tasks.map(async (t) => {
+      if ((t.slotsNeeded || 1) <= 1) return t;
+      const workerRows = await prisma.task.findMany({
+        where: { groupId: t.id },
+        select: { id: true, status: true, workerId: true, acceptedBy: { select: { fullName: true, phone: true } } }
+      });
+      return { ...t, acceptedWorkers: workerRows };
+    }));
+
+    res.json({ tasks: withWorkers });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
@@ -244,30 +277,65 @@ router.patch('/:id/accept', authWorker, async (req, res) => {
   try {
     const existing = await prisma.task.findUnique({ where: { id: req.params.id } });
     if (!existing || existing.status !== 'open') {
-      return res.status(409).json({ error: 'This job was just taken by another worker.', stale: true });
+      return res.status(409).json({ error: 'This job is no longer available.', stale: true });
     }
 
     const slots = existing.slotsNeeded || 1;
     const filled = (existing.filledSlots || 0) + 1;
     const nowFull = filled >= slots;
 
-    // Atomic: only update if still open (race-condition safe)
-    const result = await prisma.task.updateMany({
-      where: { id: req.params.id, status: 'open' },
+    if (slots === 1) {
+      // Single-worker job — atomic claim, straightforward
+      const result = await prisma.task.updateMany({
+        where: { id: req.params.id, status: 'open' },
+        data: { status: 'accepted', workerId: req.workerId, filledSlots: 1 }
+      });
+      if (result.count === 0) {
+        return res.status(409).json({ error: 'This job was just taken by another worker.', stale: true });
+      }
+      const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+      return res.json({ task, filled: 1, slots: 1, full: true });
+    }
+
+    // Multi-worker job:
+    // 1. Increment filledSlots on the original task atomically
+    // 2. Create a personal task row for this worker (so they can track/complete it)
+    // 3. Close the original task when all slots fill
+    const updateResult = await prisma.task.updateMany({
+      where: { id: req.params.id, status: 'open', filledSlots: { lt: slots } },
       data: {
-        // Stay 'open' until ALL slots filled so other workers can still accept
-        status: nowFull ? 'accepted' : 'open',
         filledSlots: filled,
-        // Only set workerId on the final accepting worker (or single-slot jobs)
-        ...(nowFull ? { workerId: req.workerId } : {}),
+        status: nowFull ? 'accepted' : 'open',
       }
     });
-    if (result.count === 0) {
-      return res.status(409).json({ error: 'This job was just taken by another worker.', stale: true });
+    if (updateResult.count === 0) {
+      return res.status(409).json({ error: 'All spots for this job have been filled.', stale: true });
     }
-    const task = await prisma.task.findUnique({ where: { id: req.params.id } });
-    res.json({ task, filled, slots, full: nowFull });
-  } catch (err) { res.status(500).json({ error: 'Server error' }); }
+
+    // Clone into a personal row for this worker so they see it in My Tasks
+    const personalTask = await prisma.task.create({
+      data: {
+        employerId:        existing.employerId,
+        taskType:          existing.taskType,
+        description:       existing.description,
+        location:          existing.location,
+        duration:          existing.duration,
+        pay:               existing.pay,
+        status:            'accepted',
+        workerId:          req.workerId,
+        groupId:           existing.id,   // links back to the parent task
+        slotsNeeded:       slots,
+        scheduledDate:     existing.scheduledDate,
+        scheduledTime:     existing.scheduledTime,
+        transportAllowance: existing.transportAllowance,
+      }
+    });
+
+    return res.json({ task: personalTask, filled, slots, full: nowFull });
+  } catch (err) {
+    console.error('[tasks/accept]', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 // PATCH /api/tasks/:id/accept-offer — worker accepts a direct dispatch offer
