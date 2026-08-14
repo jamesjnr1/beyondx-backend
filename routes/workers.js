@@ -3,7 +3,7 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
 const { PrismaPg } = require('@prisma/adapter-pg');
-const { calcProximity } = require('../utils/proximity');
+const { calcProximity, calcProximityAsync } = require('../utils/proximity');
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma  = new PrismaClient({ adapter });
@@ -164,13 +164,18 @@ router.patch('/me', authWorker, async (req, res) => {
 module.exports = router;
 
 // GET /api/workers/proximity?workerHomeArea=Madina&jobLocation=Tema
-// Returns the proximity & transport allowance between a worker's home and a job location.
-// Used by the frontend to show live transport cost before employer pays.
+// Returns proximity & transport allowance. Uses local table first, then
+// falls back to Nominatim geocoding so any Ghana location resolves.
 router.get('/proximity', async (req, res) => {
   const { workerHomeArea, jobLocation } = req.query;
   if (!workerHomeArea || !jobLocation) {
     return res.status(400).json({ error: 'workerHomeArea and jobLocation are required' });
   }
-  const result = calcProximity(workerHomeArea, jobLocation);
-  res.json(result);
+  try {
+    const result = await calcProximityAsync(workerHomeArea, jobLocation);
+    res.json(result);
+  } catch (err) {
+    console.error('[proximity] failed:', err.message);
+    res.status(500).json({ error: 'Could not calculate proximity' });
+  }
 });
