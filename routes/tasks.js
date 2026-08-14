@@ -88,7 +88,7 @@ function authEitherParty(req, res, next) {
 // for them via the dispatch flow), the task is assigned directly to that
 // worker instead of being left open, and the worker gets a confirmation SMS.
 router.post('/', authEmployer, async (req, res) => {
-  const { taskType, description, location, duration, pay, workerId, paymentRef, workersNeeded } = req.body;
+  const { taskType, description, location, duration, pay, workerId, paymentRef, workersNeeded, scheduledDate, scheduledTime } = req.body;
   if (!taskType || !location || !pay) return res.status(400).json({ error: 'taskType, location and pay are required' });
   try {
     if (workerId) {
@@ -107,11 +107,10 @@ router.post('/', authEmployer, async (req, res) => {
       location,
       duration: duration || '1 day',
       pay: parseFloat(pay),
-      // Recorded here as the employer's stated intent — admin sees this as
-      // the default slot count when actually dispatching to candidates via
-      // /admin/tasks/dispatch-multi (which creates the real offer group).
       ...(workersNeeded && workersNeeded > 1 ? { slotsNeeded: parseInt(workersNeeded, 10) } : {}),
       ...(paymentRef ? { paymentRef } : {}),
+      ...(scheduledDate ? { scheduledDate } : {}),
+      ...(scheduledTime ? { scheduledTime } : {}),
     };
     if (workerId) {
       data.workerId = workerId;

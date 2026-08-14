@@ -138,6 +138,9 @@ model Task {
   // Transport allowance — added to employer total when worker lives far from
   // the job location. The worker receives this on top of their full pay.
   transportAllowance Int?    @default(0)
+  scheduledDate  String?    // e.g. "2026-08-20" — the day the job starts
+  scheduledTime  String?    // e.g. "08:00" — time worker should arrive
+  reminderSentAt DateTime?  // set once the 1-hour-before reminder SMS fires
 
   @@index([groupId])
 }

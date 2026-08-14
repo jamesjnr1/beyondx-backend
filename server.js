@@ -43,4 +43,8 @@ app.get('/stats', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`BeyondX server running on port ${PORT}`);
+  // Start the background reminder job — checks every 5 minutes for tasks
+  // starting within the next hour and sends a reminder SMS to the worker.
+  const { startReminders } = require('./utils/reminders');
+  startReminders(statsPrisma);
 });
