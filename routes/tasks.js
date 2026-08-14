@@ -158,7 +158,10 @@ router.post('/', authEmployer, async (req, res) => {
       // after manually confirming the payment via Verify Payments.
       const firstName = (task.acceptedBy.fullName || '').split(' ')[0] || 'there';
       const workerPay = Math.round(parseFloat(task.pay));
-      const message = `BeyondX: Hi ${firstName}, you have a job offer in ${location} paying GHS ${workerPay}. Open your dashboard to accept or decline.`;
+      const prox2 = data.workerId && data.transportAllowance >= 80
+        ? { isIntercity: true } : { isIntercity: false };
+      const intercityTag = prox2.isIntercity ? ' [LONG DISTANCE]' : '';
+      const message = `BeyondX: Hi ${firstName}, you have a job offer in ${location} paying GHS ${workerPay}${intercityTag}. Open your dashboard to accept or decline.`;
       sendSMS(task.acceptedBy.phone, message);
     } else if (!workerId) {
       // Open-pool task — notify active, available workers whose skills
