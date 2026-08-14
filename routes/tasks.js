@@ -4,6 +4,7 @@ const { PrismaClient } = require('@prisma/client');
 const { PrismaPg } = require('@prisma/adapter-pg');
 const jwt = require('jsonwebtoken');
 const { sendSMS } = require('../utils/sms');
+const { calcProximity } = require('../utils/proximity');
 
 // Maps the full category title (as sent by the frontend) to the skill string
 // workers register under. Both sides use the same title strings from data.ts.
@@ -100,7 +101,7 @@ function authEitherParty(req, res, next) {
 // for them via the dispatch flow), the task is assigned directly to that
 // worker instead of being left open, and the worker gets a confirmation SMS.
 router.post('/', authEmployer, async (req, res) => {
-  const { taskType, description, location, duration, pay, workerId, paymentRef, workersNeeded, scheduledDate, scheduledTime } = req.body;
+  const { taskType, description, location, duration, pay, workerId, paymentRef, workersNeeded, scheduledDate, scheduledTime, transportAllowance: frontendTransport } = req.body;
   if (!taskType || !location || !pay) return res.status(400).json({ error: 'taskType, location and pay are required' });
   try {
     if (workerId) {
@@ -126,6 +127,18 @@ router.post('/', authEmployer, async (req, res) => {
     };
     if (workerId) {
       data.workerId = workerId;
+      // Compute transport allowance from worker's home area to job location
+      const workerForProx = await prisma.worker.findUnique({
+        where: { id: workerId },
+        select: { homeArea: true },
+      });
+      if (frontendTransport !== undefined && frontendTransport > 0) {
+        // Frontend already calculated it via /api/workers/proximity — use it directly
+        data.transportAllowance = parseInt(frontendTransport, 10);
+      } else if (workerForProx?.homeArea && location) {
+        const prox = calcProximity(workerForProx.homeArea, location);
+        if (prox.available) data.transportAllowance = prox.transportAllowance;
+      }
       // If the employer submitted payment details, hold as payment_pending until
       // BeyondX manually verifies the payment before notifying the worker.
       data.status = req.body.status === 'payment_pending' ? 'payment_pending' : 'offered';

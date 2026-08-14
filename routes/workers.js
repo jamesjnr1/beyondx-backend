@@ -162,3 +162,15 @@ router.patch('/me', authWorker, async (req, res) => {
 });
 
 module.exports = router;
+
+// GET /api/workers/proximity?workerHomeArea=Madina&jobLocation=Tema
+// Returns the proximity & transport allowance between a worker's home and a job location.
+// Used by the frontend to show live transport cost before employer pays.
+router.get('/proximity', async (req, res) => {
+  const { workerHomeArea, jobLocation } = req.query;
+  if (!workerHomeArea || !jobLocation) {
+    return res.status(400).json({ error: 'workerHomeArea and jobLocation are required' });
+  }
+  const result = calcProximity(workerHomeArea, jobLocation);
+  res.json(result);
+});

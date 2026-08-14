@@ -7,15 +7,15 @@
 // so we apply a 1.4× road factor (calibrated for Accra's grid/sprawl)
 // to get a more realistic driving/trotro distance.
 //
-// Transport cost model:
-//   0-5km   → GH₵0  (walkable / close, no transport)
-//   5-10km  → GH₵5  (one trotro, short)
-//   10-20km → GH₵10 (one or two trotros, medium)
-//   20-35km → GH₵20 (long cross-city journey)
-//   35km+   → GH₵30 (outer districts — Tema, Kasoa, Nsawam corridor)
+// Transport cost model (calibrated for 2026 Accra trotro fares):
+//   < 5km   → GH₵0  (walkable / single short trotro — no extra charge)
+//   5–10km  → GH₵12 (one trotro there and back — flat)
+//   10–20km → GH₵20 (two trotro legs or a shared taxi)
+//   20–35km → GH₵30 (long cross-city journey)
+//   35km+   → GH₵40 (outer districts — Tema, Kasoa, Nsawam corridor)
 //
-// These are approximations tuned for 2026 Accra trotro fares.
-// Workers get this amount added on top of their full task pay.
+// Workers receive this on top of their full task pay.
+// Employers see it added to their total before they pay.
 
 const ROAD_FACTOR = 1.4; // straight-line → road distance multiplier
 
@@ -143,13 +143,13 @@ function calcProximity(workerHomeArea, jobLocation) {
   if (roadKm < 5) {
     transportAllowance = 0;  tier = 'nearby';
   } else if (roadKm < 10) {
-    transportAllowance = 5;  tier = 'short';
+    transportAllowance = 12; tier = 'short';
   } else if (roadKm < 20) {
-    transportAllowance = 10; tier = 'medium';
+    transportAllowance = 20; tier = 'medium';
   } else if (roadKm < 35) {
-    transportAllowance = 20; tier = 'far';
+    transportAllowance = 30; tier = 'far';
   } else {
-    transportAllowance = 30; tier = 'very_far';
+    transportAllowance = 40; tier = 'very_far';
   }
 
   return {

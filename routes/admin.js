@@ -152,18 +152,31 @@ router.post('/tasks/dispatch-multi', adminAuth, async (req, res) => {
     const groupId = require('crypto').randomUUID();
     const offerExpiresAt = offerHours ? new Date(Date.now() + offerHours * 3600 * 1000) : null;
 
+    // Fetch homeArea for every candidate worker so we can compute per-worker
+    // transport allowance before creating the task rows.
+    const workerProfiles = await prisma.worker.findMany({
+      where: { id: { in: workerIds } },
+      select: { id: true, homeArea: true },
+    });
+    const homeAreaById = Object.fromEntries(workerProfiles.map(w => [w.id, w.homeArea]));
+
     const created = await prisma.$transaction(
-      workerIds.map(workerId => prisma.task.create({
-        data: {
-          employerId, taskType, description: description || '', location, duration,
-          pay: parseFloat(pay), status: 'offered', workerId,
-          groupId, slotsNeeded: parseInt(slotsNeeded, 10), offerExpiresAt,
-        },
-        include: {
-          acceptedBy: { select: { fullName: true, phone: true } },
-          employer: { select: { orgName: true, contactPerson: true, phone: true } },
-        },
-      }))
+      workerIds.map(workerId => {
+        const prox = calcProximity(homeAreaById[workerId], location);
+        const transportAllowance = prox.available ? prox.transportAllowance : 0;
+        return prisma.task.create({
+          data: {
+            employerId, taskType, description: description || '', location, duration,
+            pay: parseFloat(pay), status: 'offered', workerId,
+            groupId, slotsNeeded: parseInt(slotsNeeded, 10), offerExpiresAt,
+            transportAllowance,
+          },
+          include: {
+            acceptedBy: { select: { fullName: true, phone: true } },
+            employer: { select: { orgName: true, contactPerson: true, phone: true } },
+          },
+        });
+      })
     );
 
     // If this fanned out from an existing 'open' posting, retire that
