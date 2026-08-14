@@ -140,7 +140,8 @@ model Task {
   transportAllowance Int?    @default(0)
   scheduledDate  String?    // e.g. "2026-08-20" — the day the job starts
   scheduledTime  String?    // e.g. "08:00" — time worker should arrive
-  reminderSentAt DateTime?  // set once the 1-hour-before reminder SMS fires
+  reminderSentAt       DateTime?  // set once the 1-hour-before reminder SMS fires
+  morningReminderSentAt DateTime? // set once the morning-of reminder SMS fires (07:00–07:30)
 
   @@index([groupId])
 }
