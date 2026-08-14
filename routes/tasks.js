@@ -5,21 +5,33 @@ const { PrismaPg } = require('@prisma/adapter-pg');
 const jwt = require('jsonwebtoken');
 const { sendSMS } = require('../utils/sms');
 
-// Maps specific task type strings (from the "Post a Task" dropdown) to the
-// broader skill category workers register under, so open-pool task alerts
-// only reach workers whose skills are actually relevant.
+// Maps the full category title (as sent by the frontend) to the skill string
+// workers register under. Both sides use the same title strings from data.ts.
 const TASK_TYPE_TO_CATEGORY = {
-  'office cleaning': 'Facility & Cleaning', 'school compound sweeping': 'Facility & Cleaning', 'hospital ward cleaning': 'Facility & Cleaning',
-  'warehouse stock sorting': 'Logistics & Delivery', 'goods offloading': 'Logistics & Delivery', 'market porter': 'Logistics & Delivery',
-  'painting & touch-up': 'Maintenance & Repairs', 'plumbing support': 'Maintenance & Repairs', 'building site labour': 'Maintenance & Repairs',
-  'chair & table setup': 'Event & Hospitality', 'catering assistant': 'Event & Hospitality', 'food serving': 'Event & Hospitality',
-  'farm weeding': 'Agriculture & Environment', 'grass cutting': 'Agriculture & Environment', 'tree planting': 'Agriculture & Environment',
-  'shop attendant': 'Retail & Trade', 'packing & bagging': 'Retail & Trade', 'loading & offloading': 'Retail & Trade',
-  'waste collection': 'Community Services', 'school painting': 'Community Services', 'drain maintenance': 'Community Services'
+  'Facility & Cleaning':         'Facility & Cleaning',
+  'Logistics & Delivery':        'Logistics & Delivery',
+  'General Site Labour':         'General Site Labour',
+  'Skilled Trades':              'Skilled Trades',
+  'Painting & Finishing':        'Painting & Finishing',
+  'Repairs & Maintenance':       'Repairs & Maintenance',
+  'Event & Hospitality':         'Event & Hospitality',
+  'Agriculture & Environment':   'Agriculture & Environment',
+  'Retail & Trade Support':      'Retail & Trade Support',
+  'Community Services':          'Community Services',
+  'Data Entry & Digitisation':   'Data Entry & Digitisation',
+  'Customer Support':            'Customer Support',
+  'Social Media & Content':      'Social Media & Content',
+  'Transcription & Translation': 'Transcription & Translation',
+  'Online Research & Listings':  'Online Research & Listings',
+  'Virtual Assistance':          'Virtual Assistance',
 };
 function categoryForTaskType(taskType) {
-  const key = (taskType || '').toLowerCase().trim();
-  return TASK_TYPE_TO_CATEGORY[key] || null;
+  // Direct match first (full category title from frontend)
+  if (TASK_TYPE_TO_CATEGORY[taskType]) return TASK_TYPE_TO_CATEGORY[taskType];
+  // Fallback: case-insensitive match
+  const key = (taskType || '').trim();
+  const match = Object.keys(TASK_TYPE_TO_CATEGORY).find(k => k.toLowerCase() === key.toLowerCase());
+  return match ? TASK_TYPE_TO_CATEGORY[match] : null;
 }
 
 
@@ -132,8 +144,8 @@ router.post('/', authEmployer, async (req, res) => {
       // When status is payment_pending, the admin console sends the SMS
       // after manually confirming the payment via Verify Payments.
       const firstName = (task.acceptedBy.fullName || '').split(' ')[0] || 'there';
-      const workerCut = (parseFloat(task.pay) * 0.85).toFixed(0);
-      const message = `Hi ${firstName}, you've been selected for a job in ${location} paying GHS ${workerCut}. Open your BeyondX dashboard to accept or decline the offer.`;
+      const workerPay = Math.round(parseFloat(task.pay));
+      const message = `BeyondX: Hi ${firstName}, you have a job offer in ${location} paying GHS ${workerPay}. Open your dashboard to accept or decline.`;
       sendSMS(task.acceptedBy.phone, message);
     } else if (!workerId) {
       // Open-pool task — notify active, available workers whose skills
@@ -148,9 +160,12 @@ router.post('/', authEmployer, async (req, res) => {
           },
           select: { phone: true, fullName: true }
         });
-        const openWorkerCut = (parseFloat(task.pay) * 0.85).toFixed(0);
-        const message = `Hi there, a new task is open in ${location} paying GHS ${openWorkerCut}. Open your BeyondX dashboard to accept it before someone else does.`;
-        matchingWorkers.forEach(w => sendSMS(w.phone, message));
+        const openPay = Math.round(parseFloat(task.pay));
+        matchingWorkers.forEach(w => {
+          const wName = (w.fullName || '').split(' ')[0] || 'there';
+          const msg = `BeyondX: Hi ${wName}, a ${taskType} job in ${location} pays GHS ${openPay}. Check your dashboard now.`;
+          sendSMS(w.phone, msg);
+        });
       }
     }
 
@@ -459,7 +474,7 @@ router.patch('/:id/worker-done', authWorker, async (req, res) => {
     if (task.employer?.phone) {
       const workerFirstName = (task.acceptedBy?.fullName || 'Your worker').split(' ')[0];
       const contactFirstName = (task.employer.contactPerson || '').split(' ')[0] || 'there';
-      const message = `Hi ${contactFirstName}, BeyondX here. ${workerFirstName} has marked "${task.taskType}" as done. Please log in to your BeyondX dashboard to confirm the work so payment can proceed.`;
+      const message = `BeyondX: Hi ${contactFirstName}, ${workerFirstName} marked "${task.taskType}" as done. Please confirm in your dashboard so we can pay them.`;
       sendSMS(task.employer.phone, message);
     }
   } catch (err) { res.status(500).json({ error: 'Server error' }); }

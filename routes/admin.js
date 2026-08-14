@@ -207,8 +207,9 @@ router.patch('/tasks/:id/paid', adminAuth, async (req, res) => {
     res.json({ task });
 
     if (task.acceptedBy?.phone) {
-      const paidAmount = (parseFloat(task.pay) * 0.85).toFixed(0);
-      sendSMS(task.acceptedBy.phone, `You're paid! GHS ${paidAmount} has been transferred to your account. Thank you for choosing BeyondX!`);
+      const paidAmount = Math.round(parseFloat(task.pay));
+      const workerName = (task.acceptedBy.fullName || '').split(' ')[0] || 'there';
+      sendSMS(task.acceptedBy.phone, `BeyondX: Hi ${workerName}, GHS ${paidAmount} has been sent to your Mobile Money. Well done!`);
     }
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
