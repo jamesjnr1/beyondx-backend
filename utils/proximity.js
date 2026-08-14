@@ -4,12 +4,11 @@
 // Approach: text neighbourhood/city name → approximate lat/lng from a curated
 // lookup table, then Haversine for straight-line distance × 1.4 road factor.
 //
-// Transport tiers:
-//   Tier 1 — Local       (0–10km road)   GH₵0   — metro area, walkable/trotro
-//   Tier 2 — Regional    (10–40km road)  GH₵20  — cross-suburb, two trotro legs
-//   Tier 3 — Extended    (40–80km road)  GH₵50  — Nsawam/Aburi/Dodowa direction
-//   Tier 4 — Intercity   (80km+  road)   GH₵80  — flagged separately; min job
-//                                                   value required; overnight note
+// Transport tiers (2026 Accra fares):
+//   Tier 1 — Local       (0–10km road)   GH₵8   — small flat, upper-edge coverage
+//   Tier 2 — Regional    (10–40km road)  GH₵40  — round trip trotro + transfer
+//   Tier 3 — Extended    (40–80km road)  GH₵90  — intercity bus round trip + buffer
+//   Tier 4 — Intercity   (80km+  road)   GH₵200 — full bus fare + food + transit day
 //
 // Intercity jobs (Tier 4) are flagged with isIntercity=true so the UI can:
 //   - Show a prominent warning before the worker accepts
@@ -19,14 +18,14 @@
 const ROAD_FACTOR = 1.4;
 
 // Minimum job pay for intercity dispatch to be offered at all
-const INTERCITY_MIN_JOB_VALUE = 150; // GH₵
+const INTERCITY_MIN_JOB_VALUE = 200; // GH₵ — job must justify a full transit day
 
 // Export so frontend can validate
 const TIERS = {
-  local:    { label: 'Local',            maxRoadKm: 10,  allowance: 0,  description: 'Metro area — no transport charge' },
-  regional: { label: 'Regional',         maxRoadKm: 40,  allowance: 20, description: 'Cross-suburb — covers two trotro legs there and back' },
-  extended: { label: 'Extended regional',maxRoadKm: 80,  allowance: 50, description: 'Nsawam / Aburi / Dodowa direction — full journey each way' },
-  intercity:{ label: 'Intercity',        maxRoadKm: Infinity, allowance: 80, description: 'Long-distance assignment — worker needs full round-trip fare plus time allowance' },
+  local:    { label: 'Local',            maxRoadKm: 10,  allowance: 8,   description: 'Metro area — small flat contribution' },
+  regional: { label: 'Regional',         maxRoadKm: 40,  allowance: 40,  description: 'Cross-suburb — round-trip trotro with transfer' },
+  extended: { label: 'Extended regional',maxRoadKm: 80,  allowance: 90,  description: 'Intercity bus round trip plus waiting and taxi buffer' },
+  intercity:{ label: 'Intercity',        maxRoadKm: Infinity, allowance: 200, description: 'Full round-trip bus fare, food, and transit day compensation' },
 };
 
 const AREA_COORDS = {
@@ -163,10 +162,10 @@ function calcProximity(workerHomeArea, jobLocation) {
   const roadKm     = distanceKm * ROAD_FACTOR;
 
   let tierKey, transportAllowance;
-  if      (roadKm < 10) { tierKey = 'local';     transportAllowance = 0;  }
-  else if (roadKm < 40) { tierKey = 'regional';  transportAllowance = 20; }
-  else if (roadKm < 80) { tierKey = 'extended';  transportAllowance = 50; }
-  else                  { tierKey = 'intercity';  transportAllowance = 80; }
+  if      (roadKm < 10) { tierKey = 'local';     transportAllowance = 8;   }
+  else if (roadKm < 40) { tierKey = 'regional';  transportAllowance = 40;  }
+  else if (roadKm < 80) { tierKey = 'extended';  transportAllowance = 90;  }
+  else                  { tierKey = 'intercity';  transportAllowance = 200; }
 
   const tierInfo  = TIERS[tierKey];
   const isIntercity = tierKey === 'intercity';
