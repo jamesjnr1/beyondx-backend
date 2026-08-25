@@ -16,6 +16,8 @@ app.use('/api/verification', require('./routes/verification'));
 app.use('/api/track', require('./routes/track'));
 app.use('/api/leads', require('./routes/leads'));
 app.use('/api/otp', require('./routes/otp'));
+app.use('/api/scope', require('./routes/scope'));
+app.use('/api/coordinators', require('./routes/coordinators'));
 
 app.get('/', (req, res) => {
   res.json({ status: 'BeyondX API is running' });

@@ -359,6 +359,88 @@ router.get('/workers', adminAuth, async (req, res) => {
 // to surface delivery problems (especially a depleted Arkesel balance)
 // instead of these only being visible in Railway's server logs.
 // GET /admin/leads — everyone captured at events, newest first
+// ── SCOPE DISPUTES ───────────────────────────────────────────────────────
+
+router.get('/disputes', adminAuth, async (req, res) => {
+  try {
+    const disputes = await prisma.scopeDispute.findMany({
+      orderBy: { createdAt: 'desc' },
+      include: {
+        task: { select: { taskType: true, location: true, pay: true, employer: { select: { orgName: true } } } },
+        worker: { select: { fullName: true, phone: true } }
+      }
+    });
+    res.json({ disputes });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.patch('/disputes/:id', adminAuth, async (req, res) => {
+  const { status, adjustedPrice, adminNote } = req.body;
+  if (!['approved', 'rejected'].includes(status)) return res.status(400).json({ error: 'status must be approved or rejected' });
+  try {
+    const dispute = await prisma.scopeDispute.update({
+      where: { id: req.params.id },
+      data: {
+        status,
+        adjustedPrice: adjustedPrice ? parseFloat(adjustedPrice) : undefined,
+        adminNote:     adminNote || null,
+        resolvedAt:    new Date(),
+      },
+      include: { task: { include: { acceptedBy: { select: { phone: true } }, employer: { select: { phone: true } } } } }
+    });
+    // On approval, notify worker and employer
+    if (status === 'approved' && adjustedPrice) {
+      const { sendSMS } = require('../utils/sms');
+      const workerPhone = dispute.task?.acceptedBy?.phone;
+      const empPhone    = dispute.task?.employer?.phone;
+      if (workerPhone) sendSMS(workerPhone, `BeyondX: Scope change approved. Adjusted pay: GH${adjustedPrice}. ${dispute.requiresEmployerConfirm ? 'Awaiting employer confirmation before you resume.' : 'Continue work.'}`).catch(() => null);
+      if (empPhone && dispute.requiresEmployerConfirm) sendSMS(empPhone, `BeyondX: Scope change on your job. New price: GH${adjustedPrice}. Reply to confirm via your dashboard.`).catch(() => null);
+    }
+    res.json({ dispute });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── PRICE TIERS ───────────────────────────────────────────────────────────
+
+router.get('/price-tiers', adminAuth, async (req, res) => {
+  try {
+    const tiers = await prisma.priceTier.findMany({ orderBy: [{ category: 'asc' }, { tier: 'asc' }] });
+    res.json({ tiers });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.patch('/price-tiers/:id', adminAuth, async (req, res) => {
+  const { basePrice, materialsSurcharge } = req.body;
+  try {
+    const tier = await prisma.priceTier.update({
+      where: { id: req.params.id },
+      data: { basePrice: parseFloat(basePrice), materialsSurcharge: materialsSurcharge != null ? parseFloat(materialsSurcharge) : null }
+    });
+    res.json({ tier });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── COORDINATOR CHANNEL ───────────────────────────────────────────────────
+
+router.get('/coordinators', adminAuth, async (req, res) => {
+  try {
+    const coordinators = await prisma.coordinator.findMany({
+      include: {
+        dispatches: { orderBy: { createdAt: 'desc' } }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+    const enriched = coordinators.map(c => ({
+      ...c,
+      pinHash: undefined,
+      avgJobValue: c.dispatches.length
+        ? c.dispatches.reduce((s, d) => s + d.negotiatedRate * d.workersDispatched, 0) / c.dispatches.length
+        : 0
+    }));
+    res.json({ coordinators: enriched });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 router.get('/leads', adminAuth, async (req, res) => {
   try {
     const leads = await prisma.lead.findMany({ orderBy: { createdAt: 'desc' } });

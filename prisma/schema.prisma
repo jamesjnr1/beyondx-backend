@@ -141,7 +141,10 @@ model Task {
   scheduledDate  String?    // e.g. "2026-08-20" — the day the job starts
   scheduledTime  String?    // e.g. "08:00" — time worker should arrive
   reminderSentAt       DateTime?  // set once the 1-hour-before reminder SMS fires
-  morningReminderSentAt DateTime? // set once the morning-of reminder SMS fires (07:00–07:30)
+  morningReminderSentAt DateTime?
+
+  scope          TaskScope?
+  disputes       ScopeDispute[]
 
   @@index([groupId])
 }
@@ -274,4 +277,97 @@ model Visitor {
 
   @@index([firstSeenAt])
   @@index([convertedAt])
+}
+
+// ── TIERED PRICING ─────────────────────────────────────────────────────────
+// Price bands per category × tier. Replaces single fixed price per category.
+model PriceTier {
+  id                String  @id @default(uuid())
+  category          String  // matches task category names
+  tier              String  // 'small' | 'medium' | 'large'
+  basePrice         Float
+  materialsSurcharge Float? // added when materials_provided = false
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([category, tier])
+  @@index([category])
+}
+
+// ── SCOPE FORM ─────────────────────────────────────────────────────────────
+// Employer fills this before receiving a quote.
+model TaskScope {
+  id                String   @id @default(uuid())
+  taskId            String?  @unique // links to Task once created
+  employerId        String
+  category          String
+  tier              String   // 'small' | 'medium' | 'large'
+  estimatedHours    Float
+  materialsProvided Boolean  @default(false)
+  notes             String?
+  photoUrls         String[] @default([])
+  quotedPrice       Float?   // calculated at submission
+  createdAt         DateTime @default(now())
+
+  employer Employer @relation(fields: [employerId], references: [id])
+  task     Task?    @relation(fields: [taskId], references: [id])
+
+  @@index([employerId])
+}
+
+// ── SCOPE DISPUTES ─────────────────────────────────────────────────────────
+// Worker or coordinator flags that job scope exceeds original quote.
+model ScopeDispute {
+  id             String   @id @default(uuid())
+  taskId         String
+  flaggedBy      String   // workerId
+  reason         String
+  originalPrice  Float
+  requestedPrice Float
+  adjustedPrice  Float?   // set by admin on approval
+  status         String   @default("pending") // pending | approved | rejected
+  adminNote      String?
+  requiresEmployerConfirm Boolean @default(false)
+  employerConfirmed       Boolean @default(false)
+  createdAt      DateTime @default(now())
+  resolvedAt     DateTime?
+
+  task    Task   @relation(fields: [taskId], references: [id])
+  worker  Worker @relation(fields: [flaggedBy], references: [id])
+
+  @@index([taskId])
+  @@index([status])
+}
+
+// ── COORDINATOR ACCOUNTS ───────────────────────────────────────────────────
+// Coordinators submit custom rates per job; individual artisans use tiers.
+model Coordinator {
+  id           String   @id @default(uuid())
+  fullName     String
+  phone        String   @unique
+  email        String?
+  orgName      String?  // company/team name if any
+  pinHash      String
+  isActive     Boolean  @default(true)
+  totalJobs    Int      @default(0)
+  totalWorkers Int      @default(0)
+  totalCommission Float @default(0)
+  createdAt    DateTime @default(now())
+
+  dispatches CoordinatorDispatch[]
+}
+
+// Tracks each job a coordinator dispatches — for analytics and commission.
+model CoordinatorDispatch {
+  id              String   @id @default(uuid())
+  coordinatorId   String
+  taskId          String   @unique
+  workersDispatched Int    @default(1)
+  negotiatedRate  Float    // coordinator's custom rate per worker
+  commission      Float    // GH₵20 × workersDispatched
+  createdAt       DateTime @default(now())
+
+  coordinator Coordinator @relation(fields: [coordinatorId], references: [id])
+
+  @@index([coordinatorId])
 }
