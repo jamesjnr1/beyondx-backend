@@ -332,6 +332,8 @@ router.get('/workers', adminAuth, async (req, res) => {
         homeLng:        true,
         guarantorRelationship: true,
         createdAt:      true,
+        role:           true,
+        coordinatorApplication: true,
         tasks: {
           where: { status: { in: ['accepted', 'pending_confirmation'] } },
           select: { id: true }
@@ -347,6 +349,75 @@ router.get('/workers', adminAuth, async (req, res) => {
     res.json({ workers: flattened });
   } catch (err) {
     console.error('Fetch admin workers error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── COORDINATOR APPLICATIONS ──────────────────────────────────────────────
+// A worker applies to become a Coordinator from their dashboard (see
+// beyondx-website src/components/CoordinatorApply.tsx); the application is
+// stored as JSON in Worker.coordinatorApplication. Staff review it here and
+// approve/deny — approving flips Worker.role to 'coordinator', which is what
+// switches that worker over to the Coordinator dashboard on the frontend.
+
+// GET /admin/coordinator-applications?status=pending — defaults to pending.
+// Pass status=all to see every worker who has ever applied.
+router.get('/coordinator-applications', adminAuth, async (req, res) => {
+  try {
+    const workers = await prisma.worker.findMany({
+      where: { coordinatorApplication: { not: null } },
+      select: {
+        id: true, workerId: true, fullName: true, phone: true, role: true,
+        coordinatorApplication: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    const statusFilter = req.query.status || 'pending';
+    const applications = workers
+      .map(w => {
+        let application = null;
+        try { application = JSON.parse(w.coordinatorApplication); } catch { /* malformed — skip */ }
+        return application && { workerId: w.workerId, fullName: w.fullName, phone: w.phone, role: w.role, application };
+      })
+      .filter(Boolean)
+      .filter(a => statusFilter === 'all' || a.application.status === statusFilter);
+    res.json({ applications });
+  } catch (err) {
+    console.error('Fetch coordinator applications error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PATCH /admin/coordinator-applications/:workerId  { action: 'approve' | 'deny', reviewNote? }
+router.patch('/coordinator-applications/:workerId', adminAuth, async (req, res) => {
+  const { action, reviewNote } = req.body;
+  if (!['approve', 'deny'].includes(action)) {
+    return res.status(400).json({ error: "action must be 'approve' or 'deny'" });
+  }
+  try {
+    const worker = await prisma.worker.findUnique({
+      where: { workerId: req.params.workerId },
+      select: { id: true, coordinatorApplication: true },
+    });
+    if (!worker) return res.status(404).json({ error: 'Worker not found' });
+    let application;
+    try { application = JSON.parse(worker.coordinatorApplication); } catch {
+      return res.status(400).json({ error: 'This worker has no valid coordinator application on file.' });
+    }
+    application.status = action === 'approve' ? 'approved' : 'denied';
+    if (reviewNote !== undefined) application.reviewNote = reviewNote || undefined;
+
+    await prisma.worker.update({
+      where: { id: worker.id },
+      data: {
+        coordinatorApplication: JSON.stringify(application),
+        ...(action === 'approve' ? { role: 'coordinator' } : {}),
+      },
+      select: { id: true },
+    });
+    res.json({ ok: true, application });
+  } catch (err) {
+    console.error('Update coordinator application error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
