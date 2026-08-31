@@ -35,11 +35,18 @@ model Worker {
   homeArea              String?    // neighbourhood/area, e.g. "Madina, Accra"
   homeLat               Float?     // approximate, from area lookup or GPS
   homeLng               Float?
+  role                  String     @default("worker") // 'worker' | 'coordinator', set by BeyondX staff on approval
+  coordinatorApplication String?   // JSON: CoordinatorApplication (see beyondx-website src/lib/coordinator.ts)
+  coordinatorTeam         String?  // JSON: TeamMember[]
+  coordinatorDisputes     String?  // JSON: CoordinatorDispute[]
+  coordinatorQuotes       String?  // JSON: Record<taskId, CoordinatorQuote>
+  coordinatorPayoutSplits String?  // JSON: Record<taskId, PayoutSplitRecord>
   createdAt      DateTime     @default(now())
   dispatches     Dispatch[]
   ussdSessions   UssdSession[]
   tasks Task[]
   reviewsReceived Review[] @relation("ReviewsOfWorker")
+  scopeDisputesFlagged ScopeDispute[]
 }
 
 model Employer {
@@ -60,6 +67,7 @@ model Employer {
   payments      Payment[]
   tasks      Task[]
   reviewsReceived Review[] @relation("ReviewsOfEmployer")
+  taskScopes TaskScope[]
 }
 
 model Dispatch {
