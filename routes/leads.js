@@ -1,10 +1,6 @@
 const express = require('express');
+const prisma  = require('../lib/prisma');
 const router = express.Router();
-const { PrismaClient } = require('@prisma/client');
-const { PrismaPg } = require('@prisma/adapter-pg');
-
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
-const prisma = new PrismaClient({ adapter });
 
 // POST /api/leads — public, unauthenticated. Used by public/market-day.html
 // at events (market days, expos) to capture interest from people who stop

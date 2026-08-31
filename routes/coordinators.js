@@ -6,11 +6,7 @@ const express  = require('express');
 const router   = express.Router();
 const bcrypt   = require('bcryptjs');
 const jwt      = require('jsonwebtoken');
-const { PrismaClient } = require('@prisma/client');
-const { PrismaPg }    = require('@prisma/adapter-pg');
-
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
-const prisma  = new PrismaClient({ adapter });
+const prisma  = require('../lib/prisma');
 
 const COMMISSION = 20; // GH₵20 flat per worker dispatched
 

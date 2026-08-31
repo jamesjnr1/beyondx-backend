@@ -1,13 +1,9 @@
 const express = require('express');
 const router = express.Router();
-const { PrismaClient } = require('@prisma/client');
-const { PrismaPg } = require('@prisma/adapter-pg');
 const { sendSMS } = require('../utils/sms');
 const { expireStaleOffers } = require('./tasks');
 const { calcProximity } = require('../utils/proximity');
-
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
-const prisma = new PrismaClient({ adapter });
+const prisma  = require('../lib/prisma');
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'beyondx2026';
 
