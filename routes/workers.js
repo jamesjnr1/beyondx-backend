@@ -52,6 +52,8 @@ router.get('/', async (req, res) => {
           where: { status: { in: ['offered', 'accepted', 'pending_confirmation'] } },
           select: { id: true }
         },
+        role:           true,
+        coordinatorApplication: true,
         reviewsReceived: {
           where: { fromRole: 'employer' },
           select: {
@@ -107,6 +109,8 @@ router.get('/me', authWorker, async (req, res) => {
         tasksCompleted: true, totalEarned: true, gpsVerified: true,
         guarantorName: true, guarantorPhone: true, guarantorRelationship: true,
         photoUrl: true, homeArea: true,
+        role: true, coordinatorApplication: true, coordinatorTeam: true,
+        coordinatorDisputes: true, coordinatorQuotes: true, coordinatorPayoutSplits: true,
         reviewsReceived: {
           where: { fromRole: 'employer' },
           select: { rating: true, comment: true, createdAt: true },
@@ -121,12 +125,31 @@ router.get('/me', authWorker, async (req, res) => {
   }
 });
 
-// PATCH /api/workers/me — a worker updates their own skills/bio.
-// Deliberately limited: workers cannot change their name, phone, PIN, or
-// guarantor details here — those go through support, to keep identity
-// verification meaningful.
+// Coordinator state is stored as JSON-in-a-field (see beyondx-website
+// src/lib/coordinator.ts for the shapes). Accept either a pre-stringified
+// JSON string or a plain object/array, and store it as text either way.
+function asJsonString(value, maxLen) {
+  const str = typeof value === 'string' ? value : JSON.stringify(value);
+  if (typeof str !== 'string' || str.length > maxLen) return undefined;
+  try { JSON.parse(str); } catch { return undefined; }
+  return str;
+}
+
+// Only an approved Coordinator may write team/dispute/quote/payout state.
+const COORDINATOR_ONLY_FIELDS = {
+  coordinatorTeam: 50000,
+  coordinatorDisputes: 50000,
+  coordinatorQuotes: 50000,
+  coordinatorPayoutSplits: 50000,
+};
+
+// PATCH /api/workers/me — a worker updates their own skills/bio, or files/
+// manages a Coordinator application. Deliberately limited: workers cannot
+// change their name, phone, PIN, or guarantor details here — those go
+// through support, to keep identity verification meaningful. Role itself
+// (worker -> coordinator) is set by BeyondX staff on approval, not here.
 router.patch('/me', authWorker, async (req, res) => {
-  const { skills, bio, photoUrl, homeArea } = req.body;
+  const { skills, bio, photoUrl, homeArea, coordinatorApplication, ...rest } = req.body;
   const data = {};
   if (homeArea !== undefined) {
     data.homeArea = typeof homeArea === 'string' ? homeArea.trim().slice(0, 200) : null;
@@ -150,6 +173,25 @@ router.patch('/me', authWorker, async (req, res) => {
     }
     data.photoUrl = photoUrl;
   }
+  if (coordinatorApplication !== undefined) {
+    const json = asJsonString(coordinatorApplication, 20000);
+    if (json === undefined) return res.status(400).json({ error: 'Invalid coordinator application.' });
+    data.coordinatorApplication = json;
+  }
+
+  const coordinatorFieldsRequested = Object.keys(COORDINATOR_ONLY_FIELDS).filter(k => rest[k] !== undefined);
+  if (coordinatorFieldsRequested.length) {
+    const current = await prisma.worker.findUnique({ where: { id: req.workerId }, select: { role: true } });
+    if (!current || current.role !== 'coordinator') {
+      return res.status(403).json({ error: 'Only approved Coordinators can update team data.' });
+    }
+    for (const key of coordinatorFieldsRequested) {
+      const json = asJsonString(rest[key], COORDINATOR_ONLY_FIELDS[key]);
+      if (json === undefined) return res.status(400).json({ error: `Invalid ${key}.` });
+      data[key] = json;
+    }
+  }
+
   if (Object.keys(data).length === 0) {
     return res.status(400).json({ error: 'Nothing to update.' });
   }
