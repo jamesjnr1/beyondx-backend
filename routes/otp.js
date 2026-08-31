@@ -1,11 +1,7 @@
 const express = require('express');
 const router  = express.Router();
-const { PrismaClient } = require('@prisma/client');
-const { PrismaPg }    = require('@prisma/adapter-pg');
 const { sendSMS }     = require('../utils/sms');
-
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
-const prisma  = new PrismaClient({ adapter });
+const prisma  = require('../lib/prisma');
 
 const TTL_MS     = 15 * 60 * 1000;   // 15 minutes
 const COOLDOWN   = 30 * 1000;        // 30 seconds between resends

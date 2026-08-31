@@ -1,8 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors    = require('cors');
-const { PrismaClient } = require('@prisma/client');
-const { PrismaPg } = require('@prisma/adapter-pg');
+const prisma  = require('./lib/prisma');
 
 const app = express();
 app.use(cors());
@@ -25,15 +24,12 @@ app.get('/', (req, res) => {
 
 // Public, unauthenticated aggregate stats — no personal data, safe to expose.
 // Used to show live numbers on the admin login screen.
-const statsAdapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
-const statsPrisma = new PrismaClient({ adapter: statsAdapter });
-
 app.get('/stats', async (req, res) => {
   try {
     const [workers, completed, tasks] = await Promise.all([
-      statsPrisma.worker.count(),
-      statsPrisma.task.count({ where: { status: 'completed' } }),
-      statsPrisma.task.findMany({ where: { status: 'completed' }, select: { pay: true } }),
+      prisma.worker.count(),
+      prisma.task.count({ where: { status: 'completed' } }),
+      prisma.task.findMany({ where: { status: 'completed' }, select: { pay: true } }),
     ]);
     const revenue = tasks.reduce((sum, t) => sum + Number(t.pay || 0), 0);
     res.json({ workers, completed, revenue });
@@ -48,5 +44,5 @@ app.listen(PORT, () => {
   // Start the background reminder job — checks every 5 minutes for tasks
   // starting within the next hour and sends a reminder SMS to the worker.
   const { startReminders } = require('./utils/reminders');
-  startReminders(statsPrisma);
+  startReminders(prisma);
 });

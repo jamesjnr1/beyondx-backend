@@ -1,10 +1,6 @@
 const express = require('express');
+const prisma  = require('../lib/prisma');
 const router = express.Router();
-const { PrismaClient } = require('@prisma/client');
-const { PrismaPg } = require('@prisma/adapter-pg');
-
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
-const prisma = new PrismaClient({ adapter });
 
 // POST /api/track — public, unauthenticated. Called once per site visit from
 // the frontend with a client-generated visitorId (a UUID kept in

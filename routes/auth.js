@@ -1,13 +1,10 @@
 const express = require('express');
 const bcrypt  = require('bcryptjs');
 const jwt     = require('jsonwebtoken');
-const { PrismaClient } = require('@prisma/client');
-const { PrismaPg } = require('@prisma/adapter-pg');
 const { Resend } = require('resend');
 const { sendSMS } = require('../utils/sms');
+const prisma  = require('../lib/prisma');
 
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
-const prisma  = new PrismaClient({ adapter });
 const router  = express.Router();
 
 // Best-effort: link a registration back to the anonymous visitor record

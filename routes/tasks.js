@@ -1,10 +1,9 @@
 const express = require('express');
 const router = express.Router();
-const { PrismaClient } = require('@prisma/client');
-const { PrismaPg } = require('@prisma/adapter-pg');
 const jwt = require('jsonwebtoken');
 const { sendSMS } = require('../utils/sms');
 const { calcProximity } = require('../utils/proximity');
+const prisma  = require('../lib/prisma');
 
 // Maps the full category title (as sent by the frontend) to the skill string
 // workers register under. Both sides use the same title strings from data.ts.
@@ -34,10 +33,6 @@ function categoryForTaskType(taskType) {
   const match = Object.keys(TASK_TYPE_TO_CATEGORY).find(k => k.toLowerCase() === key.toLowerCase());
   return match ? TASK_TYPE_TO_CATEGORY[match] : null;
 }
-
-
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
-const prisma = new PrismaClient({ adapter });
 
 // Offer expiry — checked lazily on read rather than via a cron job, since
 // none is configured for this project on Railway. Any 'offered' task whose
