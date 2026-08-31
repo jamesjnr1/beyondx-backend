@@ -26,7 +26,7 @@ router.post('/register', async (req, res) => {
   const { fullName, phone, pin, orgName, email } = req.body;
   if (!fullName || !phone || !pin) return res.status(400).json({ error: 'fullName, phone and pin required' });
   try {
-    const exists = await prisma.coordinator.findUnique({ where: { phone } });
+    const exists = await prisma.coordinator.findUnique({ where: { phone }, select: { id: true } });
     if (exists) return res.status(409).json({ error: 'A coordinator account already exists for this phone number' });
     const pinHash = await bcrypt.hash(String(pin), 12);
     const coordinator = await prisma.coordinator.create({ data: { fullName, phone, pinHash, orgName, email } });
@@ -40,8 +40,15 @@ router.post('/login', async (req, res) => {
   const { phone, pin } = req.body;
   if (!phone || !pin) return res.status(400).json({ error: 'phone and pin required' });
   try {
-    const coordinator = await prisma.coordinator.findUnique({ where: { phone } });
+    const coordinator = await prisma.coordinator.findUnique({
+      where: { phone },
+      select: { id: true, isActive: true, pinHash: true, fullName: true, orgName: true },
+    });
     if (!coordinator || !coordinator.isActive) return res.status(401).json({ error: 'Account not found or inactive' });
+    if (typeof coordinator.pinHash !== 'string' || !coordinator.pinHash) {
+      console.error(`[coordinator-login] coordinator ${coordinator.id} has no valid pinHash`);
+      return res.status(401).json({ error: 'Incorrect PIN' });
+    }
     const valid = await bcrypt.compare(String(pin), coordinator.pinHash);
     if (!valid) return res.status(401).json({ error: 'Incorrect PIN' });
     const token = jwt.sign({ id: coordinator.id, role: 'coordinator' }, process.env.JWT_SECRET, { expiresIn: '30d' });

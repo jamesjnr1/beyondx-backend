@@ -172,13 +172,41 @@ router.post('/worker-login', async (req, res) => {
   if (!phone || !pin) return res.status(400).json({ error: 'Phone and PIN are required' });
 
   try {
-    const worker = await prisma.worker.findFirst({ where: { phone } });
+    // Explicit select — an unscoped findFirst pulls every column the current
+    // schema.prisma declares, so a column merged into the schema but not yet
+    // migrated onto this database (deploys here don't run migrations
+    // automatically) would break login for every worker, not just one.
+    const worker = await prisma.worker.findFirst({
+      where: { phone },
+      select: {
+        id: true, workerId: true, fullName: true, phone: true, pinHash: true,
+        tasksCompleted: true, totalEarned: true, rating: true, skills: true,
+      },
+    });
     if (!worker) return res.status(401).json({ error: 'No account found with that phone number.' });
+
+    // A handful of older accounts have a missing/malformed pinHash (data
+    // predating a migration, or a manual DB fix that didn't set one) —
+    // bcrypt.compare throws on a non-string hash instead of just returning
+    // false, which would otherwise crash this request with a generic 500.
+    // Send them through the existing "Forgot PIN?" reset flow instead.
+    if (typeof worker.pinHash !== 'string' || !worker.pinHash) {
+      console.error(`[worker-login] worker ${worker.workerId} has no valid pinHash — needs a PIN reset`);
+      return res.status(401).json({ error: 'Your PIN needs to be reset. Tap "Forgot PIN?" below to set a new one.' });
+    }
 
     const valid = await bcrypt.compare(pin, worker.pinHash);
     if (!valid) return res.status(401).json({ error: 'Incorrect PIN.' });
 
-    await prisma.worker.update({ where: { id: worker.id }, data: { lastActiveAt: new Date() } });
+    // Best-effort bookkeeping — an unscoped update() returns the full row by
+    // default, so this must not be allowed to fail the login itself (it hit
+    // exactly this problem: a column declared in schema.prisma that a given
+    // deploy of the database doesn't have yet).
+    prisma.worker.update({
+      where: { id: worker.id },
+      data: { lastActiveAt: new Date() },
+      select: { id: true },
+    }).catch((err) => console.error('[worker-login] lastActiveAt update failed (non-fatal):', err.message));
 
     const token = jwt.sign(
       { id: worker.id, workerId: worker.workerId, role: 'worker' },
@@ -232,7 +260,10 @@ router.post('/worker-reset-pin', async (req, res) => {
     await prisma.phoneOtp.delete({ where: { phone: normPhone } }).catch(() => null);
 
     // Find and update the worker
-    const worker = await prisma.worker.findFirst({ where: { phone: { contains: phone.replace(/[\s\-]/g, '').slice(-9) } } });
+    const worker = await prisma.worker.findFirst({
+      where: { phone: { contains: phone.replace(/[\s\-]/g, '').slice(-9) } },
+      select: { id: true },
+    });
     if (!worker) return res.status(404).json({ error: 'No worker found with that phone number.' });
     const pinHash = await bcrypt.hash(newPin, 12);
     await prisma.worker.update({ where: { id: worker.id }, data: { pinHash } });
@@ -249,7 +280,10 @@ router.post('/employer-forgot-password', async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: 'Email is required.' });
   try {
-    const employer = await prisma.employer.findUnique({ where: { email: email.toLowerCase().trim() } });
+    const employer = await prisma.employer.findUnique({
+      where: { email: email.toLowerCase().trim() },
+      select: { id: true, email: true },
+    });
     // Always respond ok so we don't reveal which emails are registered
     if (!employer) return res.json({ ok: true });
 
@@ -331,10 +365,19 @@ router.post('/employer-login', async (req, res) => {
 
   try {
     const employer = await prisma.employer.findUnique({
-      where: { email: email.toLowerCase().trim() }
+      where: { email: email.toLowerCase().trim() },
+      select: {
+        id: true, email: true, passwordHash: true, orgName: true,
+        contactPerson: true, isVerified: true, acknowledgedAt: true,
+      },
     });
 
     if (!employer) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    if (typeof employer.passwordHash !== 'string' || !employer.passwordHash) {
+      console.error(`[employer-login] employer ${employer.id} has no valid passwordHash`);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
@@ -378,7 +421,8 @@ router.post('/employer-register', async (req, res) => {
 
   try {
     const existing = await prisma.employer.findUnique({
-      where: { email: email.toLowerCase().trim() }
+      where: { email: email.toLowerCase().trim() },
+      select: { id: true },
     });
 
     if (existing) {
