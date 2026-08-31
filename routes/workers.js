@@ -193,9 +193,15 @@ router.patch('/me', authWorker, async (req, res) => {
     return res.status(400).json({ error: 'Nothing to update.' });
   }
   try {
-    const worker = await prisma.worker.update({ where: { id: req.workerId }, data });
-    res.json({ worker });
+    // No `select` here on purpose: every caller on the frontend (CoordinatorApply,
+    // HomeAreaInline, WorkExperienceCard, ProfileModal) ignores this response body
+    // and works off the patch it already has locally, so there's nothing to gain
+    // by returning the full row — only a full-row select to break if the database
+    // is ever missing a column the current schema declares (see PR #3).
+    await prisma.worker.update({ where: { id: req.workerId }, data, select: { id: true } });
+    res.json({ ok: true });
   } catch (err) {
+    console.error('[workers/me PATCH] update failed:', err.message);
     res.status(500).json({ error: 'Server error' });
   }
 });
