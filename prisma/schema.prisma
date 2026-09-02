@@ -47,6 +47,7 @@ model Worker {
   tasks Task[]
   reviewsReceived Review[] @relation("ReviewsOfWorker")
   scopeDisputesFlagged ScopeDispute[]
+  coordinatorJobRequests CoordinatorJobRequest[]
 }
 
 model Employer {
@@ -68,6 +69,7 @@ model Employer {
   tasks      Task[]
   reviewsReceived Review[] @relation("ReviewsOfEmployer")
   taskScopes TaskScope[]
+  coordinatorJobRequests CoordinatorJobRequest[]
 }
 
 model Dispatch {
@@ -378,4 +380,42 @@ model CoordinatorDispatch {
   coordinator Coordinator @relation(fields: [coordinatorId], references: [id])
 
   @@index([coordinatorId])
+}
+
+// A job an employer wants to send to a Worker whose role is 'coordinator'
+// (the worker-application coordinator system — see Worker.coordinatorApplication
+// above; NOT the standalone Coordinator model). Coordinator jobs aren't
+// instantly priced: the coordinator inspects the scope and quotes a price,
+// BeyondX staff approve or reject that quote, and only on approval does a
+// real Task get created (workerId set, pay = the approved quote) — see
+// routes/coordinatorRequests.js and the admin coordinator-requests endpoints
+// in routes/admin.js.
+model CoordinatorJobRequest {
+  id                String    @id @default(uuid())
+  employer          Employer  @relation(fields: [employerId], references: [id])
+  employerId        String
+  coordinator       Worker    @relation(fields: [coordinatorId], references: [id])
+  coordinatorId     String
+  taskType          String
+  description       String?
+  location          String
+  duration          String
+  workersNeeded     Int       @default(1)
+  materialsProvided Boolean   @default(false)
+  scheduledDate     String?
+  scheduledTime     String?
+  // pending_coordinator -> quoted -> admin_approved (Task created, taskId set)
+  //                                -> admin_rejected
+  //                     -> declined
+  status            String    @default("pending_coordinator")
+  quotedPrice       Float?
+  quoteNote         String?
+  quotedAt          DateTime?
+  adminNote         String?
+  resolvedAt        DateTime?
+  taskId            String?   @unique
+  createdAt         DateTime  @default(now())
+
+  @@index([coordinatorId])
+  @@index([employerId])
 }

@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors    = require('cors');
 const prisma  = require('./lib/prisma');
-const { ensureWorkerColumns } = require('./lib/ensureSchema');
+const { ensureSchema } = require('./lib/ensureSchema');
 
 const app = express();
 app.use(cors());
@@ -18,6 +18,7 @@ app.use('/api/leads', require('./routes/leads'));
 app.use('/api/otp', require('./routes/otp'));
 app.use('/api/scope', require('./routes/scope'));
 app.use('/api/coordinators', require('./routes/coordinators'));
+app.use('/api/coordinator-requests', require('./routes/coordinatorRequests'));
 
 app.get('/', (req, res) => {
   res.json({ status: 'BeyondX API is running' });
@@ -41,9 +42,9 @@ app.get('/stats', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 
-// Self-heal the Worker table's columns before accepting traffic — see
-// lib/ensureSchema.js for why this exists instead of a real migration step.
-ensureWorkerColumns(prisma).finally(() => {
+// Self-heal newer schema before accepting traffic — see lib/ensureSchema.js
+// for why this exists instead of a real migration step.
+ensureSchema(prisma).finally(() => {
   app.listen(PORT, () => {
     console.log(`BeyondX server running on port ${PORT}`);
     // Start the background reminder job — checks every 5 minutes for tasks

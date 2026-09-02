@@ -213,6 +213,28 @@ router.patch('/:id/cancel', authEmployer, async (req, res) => {
   }
 });
 
+// PATCH /api/tasks/:id/payment-ref — employer attaches a MoMo reference to a
+// task that already exists but wasn't created with one. Used specifically
+// for coordinator jobs: the task is created by BeyondX staff on approving
+// the coordinator's quote (see PATCH /admin/coordinator-requests/:id), with
+// no payment collected yet, so the employer submits it here as a follow-up
+// step. From here the existing admin verify-payment flow
+// (PATCH /admin/tasks/:id/status) is unchanged.
+router.patch('/:id/payment-ref', authEmployer, async (req, res) => {
+  const { paymentRef } = req.body;
+  if (!paymentRef || !String(paymentRef).trim()) return res.status(400).json({ error: 'A payment reference is required.' });
+  try {
+    const task = await prisma.task.findUnique({ where: { id: req.params.id }, select: { id: true, employerId: true, status: true } });
+    if (!task || task.employerId !== req.employerId) return res.status(404).json({ error: 'Task not found.' });
+    if (task.status !== 'payment_pending') return res.status(409).json({ error: 'This job is not awaiting payment.' });
+    await prisma.task.update({ where: { id: req.params.id }, data: { paymentRef: String(paymentRef).trim() }, select: { id: true } });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[tasks] payment-ref failed:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // GET /api/tasks — fetch open tasks for workers
 router.get('/', async (req, res) => {
   try {
