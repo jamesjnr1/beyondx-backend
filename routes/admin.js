@@ -422,6 +422,88 @@ router.patch('/coordinator-applications/:workerId', adminAuth, async (req, res) 
   }
 });
 
+// ── COORDINATOR JOB REQUESTS ────────────────────────────────────────────
+// An employer sends a job to a coordinator (see routes/coordinatorRequests.js);
+// once the coordinator quotes a price, staff review it here. Approving
+// creates the real Task (payment_pending, no paymentRef yet — the employer
+// submits one via PATCH /api/tasks/:id/payment-ref, then the existing
+// verify-payment flow below takes over unchanged).
+
+const CJR_SELECT = {
+  id: true, employerId: true, coordinatorId: true, taskType: true, description: true,
+  location: true, duration: true, workersNeeded: true, materialsProvided: true,
+  scheduledDate: true, scheduledTime: true, status: true, quotedPrice: true,
+  quoteNote: true, quotedAt: true, adminNote: true, resolvedAt: true, taskId: true,
+  createdAt: true,
+  employer: { select: { orgName: true, phone: true } },
+  coordinator: { select: { fullName: true, phone: true, workerId: true } },
+};
+
+// GET /admin/coordinator-requests?status=quoted — defaults to quoted (the
+// actionable queue). Pass status=all to see every request ever made.
+router.get('/coordinator-requests', adminAuth, async (req, res) => {
+  try {
+    const statusFilter = req.query.status || 'quoted';
+    const requests = await prisma.coordinatorJobRequest.findMany({
+      where: statusFilter === 'all' ? {} : { status: statusFilter },
+      select: CJR_SELECT,
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json({ requests });
+  } catch (err) {
+    console.error('Fetch coordinator requests error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PATCH /admin/coordinator-requests/:id  { action: 'approve' | 'reject', adminNote? }
+router.patch('/coordinator-requests/:id', adminAuth, async (req, res) => {
+  const { action, adminNote } = req.body;
+  if (!['approve', 'reject'].includes(action)) {
+    return res.status(400).json({ error: "action must be 'approve' or 'reject'" });
+  }
+  try {
+    const existing = await prisma.coordinatorJobRequest.findUnique({ where: { id: req.params.id } });
+    if (!existing) return res.status(404).json({ error: 'Request not found' });
+    if (existing.status !== 'quoted') return res.status(409).json({ error: 'This request is not awaiting a decision.' });
+
+    if (action === 'reject') {
+      const request = await prisma.coordinatorJobRequest.update({
+        where: { id: req.params.id },
+        data: { status: 'admin_rejected', adminNote: adminNote || null, resolvedAt: new Date() },
+        select: CJR_SELECT,
+      });
+      return res.json({ request });
+    }
+
+    const task = await prisma.task.create({
+      data: {
+        employerId: existing.employerId,
+        workerId: existing.coordinatorId,
+        taskType: existing.taskType,
+        description: existing.description || '',
+        location: existing.location,
+        duration: existing.duration,
+        pay: existing.quotedPrice,
+        status: 'payment_pending',
+        ...(existing.workersNeeded > 1 ? { slotsNeeded: existing.workersNeeded } : {}),
+        ...(existing.scheduledDate ? { scheduledDate: existing.scheduledDate } : {}),
+        ...(existing.scheduledTime ? { scheduledTime: existing.scheduledTime } : {}),
+      },
+      select: { id: true },
+    });
+    const request = await prisma.coordinatorJobRequest.update({
+      where: { id: req.params.id },
+      data: { status: 'admin_approved', adminNote: adminNote || null, resolvedAt: new Date(), taskId: task.id },
+      select: CJR_SELECT,
+    });
+    res.json({ request });
+  } catch (err) {
+    console.error('Update coordinator request error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // GET /admin/sms-logs — recent SMS send attempts, for the admin dashboard
 // to surface delivery problems (especially a depleted Arkesel balance)
 // instead of these only being visible in Railway's server logs.
