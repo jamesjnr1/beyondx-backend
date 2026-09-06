@@ -422,6 +422,102 @@ router.patch('/coordinator-applications/:workerId', adminAuth, async (req, res) 
   }
 });
 
+// ── COORDINATOR TEAMS (roster / team disputes / quotes / payout splits) ──
+// Everything an approved Coordinator manages for their own team — logged
+// team disputes, job quotes on bulk/team tasks, payout splits, roster —
+// lives as JSON-in-a-field on their Worker row (coordinatorTeam,
+// coordinatorDisputes, coordinatorQuotes, coordinatorPayoutSplits; see
+// beyondx-website src/lib/coordinator.ts and src/pages/CoordinatorDashboard.tsx).
+// Surfaced here so staff can review escalated disputes and approve/deny job
+// quotes instead of these only being visible via the coordinator's own PIN.
+// Distinct from "Coordinator Job Requests" above (one-on-one employer →
+// coordinator dispatch) and the standalone "Coordinator Channel" below
+// (the separate Coordinator model).
+function parseJSONField(str, fallback) {
+  if (!str) return fallback;
+  try { return JSON.parse(str); } catch { return fallback; }
+}
+
+router.get('/coordinator-teams', adminAuth, async (req, res) => {
+  try {
+    const workers = await prisma.worker.findMany({
+      where: { role: 'coordinator' },
+      select: {
+        workerId: true, fullName: true, phone: true,
+        coordinatorTeam: true, coordinatorDisputes: true,
+        coordinatorQuotes: true, coordinatorPayoutSplits: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    const coordinators = workers.map(w => ({
+      workerId: w.workerId,
+      fullName: w.fullName,
+      phone: w.phone,
+      team: parseJSONField(w.coordinatorTeam, []),
+      disputes: parseJSONField(w.coordinatorDisputes, []),
+      quotes: parseJSONField(w.coordinatorQuotes, {}),
+      payoutSplits: parseJSONField(w.coordinatorPayoutSplits, {}),
+    }));
+    res.json({ coordinators });
+  } catch (err) {
+    console.error('Fetch coordinator teams error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PATCH /admin/coordinator-disputes/:workerId/:disputeId  { status }
+router.patch('/coordinator-disputes/:workerId/:disputeId', adminAuth, async (req, res) => {
+  const { status } = req.body;
+  if (!status) return res.status(400).json({ error: 'status is required' });
+  try {
+    const worker = await prisma.worker.findUnique({
+      where: { workerId: req.params.workerId },
+      select: { id: true, coordinatorDisputes: true },
+    });
+    if (!worker) return res.status(404).json({ error: 'Coordinator not found' });
+    const disputes = parseJSONField(worker.coordinatorDisputes, []);
+    const idx = disputes.findIndex(d => String(d.id) === req.params.disputeId);
+    if (idx === -1) return res.status(404).json({ error: 'Dispute not found' });
+    disputes[idx] = { ...disputes[idx], status };
+    await prisma.worker.update({
+      where: { id: worker.id },
+      data: { coordinatorDisputes: JSON.stringify(disputes) },
+    });
+    res.json({ ok: true, dispute: disputes[idx] });
+  } catch (err) {
+    console.error('Update coordinator dispute error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PATCH /admin/coordinator-quotes/:workerId/:taskId  { action: 'approve' | 'deny' }
+router.patch('/coordinator-quotes/:workerId/:taskId', adminAuth, async (req, res) => {
+  const { action } = req.body;
+  if (!['approve', 'deny'].includes(action)) {
+    return res.status(400).json({ error: "action must be 'approve' or 'deny'" });
+  }
+  try {
+    const worker = await prisma.worker.findUnique({
+      where: { workerId: req.params.workerId },
+      select: { id: true, coordinatorQuotes: true },
+    });
+    if (!worker) return res.status(404).json({ error: 'Coordinator not found' });
+    const quotes = parseJSONField(worker.coordinatorQuotes, {});
+    const quote = quotes[req.params.taskId];
+    if (!quote) return res.status(404).json({ error: 'Quote not found' });
+    quote.status = action === 'approve' ? 'approved' : 'denied';
+    quotes[req.params.taskId] = quote;
+    await prisma.worker.update({
+      where: { id: worker.id },
+      data: { coordinatorQuotes: JSON.stringify(quotes) },
+    });
+    res.json({ ok: true, quote });
+  } catch (err) {
+    console.error('Update coordinator quote error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // ── COORDINATOR JOB REQUESTS ────────────────────────────────────────────
 // An employer sends a job to a coordinator (see routes/coordinatorRequests.js);
 // once the coordinator quotes a price, staff review it here. Approving
