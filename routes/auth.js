@@ -296,14 +296,11 @@ router.post('/employer-forgot-password', async (req, res) => {
       create: { phone: email.toLowerCase().trim(), code, expiresAt },
     });
 
-    // Send via email
-    sendWelcomeEmail && await sendWelcomeEmail(
-      employer.email,
-      `Your BeyondX reset code is: ${code}\n\nThis code expires in 15 minutes. If you didn't request this, ignore it.`,
-      'BeyondX — Password Reset'
-    ).catch(() => null);
-
-    // Also try Resend if available
+    // Send via Resend directly — sendWelcomeEmail() builds a "Welcome to
+    // BeyondX!" template around (orgName, contactPerson), not a reset code;
+    // an earlier version of this route misused it here, which sent a
+    // second, garbled email with the code buried mid-sentence under the
+    // wrong subject line on every password reset request.
     if (resend) {
       resend.emails.send({
         from: 'BeyondX <noreply@beyondxco.com>',

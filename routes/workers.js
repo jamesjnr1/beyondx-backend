@@ -45,6 +45,8 @@ router.get('/', async (req, res) => {
         prisonFacility: true,
         photoUrl:       true,
         homeArea:       true,
+        hasTools:       true,
+        certifications: true,
         tasks: {
           where: { status: { in: ['offered', 'accepted', 'pending_confirmation'] } },
           select: { id: true }
@@ -105,7 +107,8 @@ router.get('/me', authWorker, async (req, res) => {
         skills: true, bio: true, dailyCharge: true, rating: true,
         tasksCompleted: true, totalEarned: true, gpsVerified: true,
         guarantorName: true, guarantorPhone: true, guarantorRelationship: true,
-        photoUrl: true, homeArea: true,
+        photoUrl: true, homeArea: true, hasTools: true,
+        experienceEntries: true, certifications: true,
         role: true, coordinatorApplication: true, coordinatorTeam: true,
         coordinatorDisputes: true, coordinatorQuotes: true, coordinatorPayoutSplits: true,
         reviewsReceived: {
@@ -146,7 +149,7 @@ const COORDINATOR_ONLY_FIELDS = {
 // through support, to keep identity verification meaningful. Role itself
 // (worker -> coordinator) is set by BeyondX staff on approval, not here.
 router.patch('/me', authWorker, async (req, res) => {
-  const { skills, bio, photoUrl, homeArea, coordinatorApplication, ...rest } = req.body;
+  const { skills, bio, photoUrl, homeArea, hasTools, experienceEntries, certifications, coordinatorApplication, ...rest } = req.body;
   const data = {};
   if (homeArea !== undefined) {
     data.homeArea = typeof homeArea === 'string' ? homeArea.trim().slice(0, 200) : null;
@@ -170,10 +173,23 @@ router.patch('/me', authWorker, async (req, res) => {
     }
     data.photoUrl = photoUrl;
   }
+  if (hasTools !== undefined) {
+    data.hasTools = Boolean(hasTools);
+  }
   if (coordinatorApplication !== undefined) {
     const json = asJsonString(coordinatorApplication, 20000);
     if (json === undefined) return res.status(400).json({ error: 'Invalid coordinator application.' });
     data.coordinatorApplication = json;
+  }
+  if (experienceEntries !== undefined) {
+    const json = asJsonString(experienceEntries, 20000);
+    if (json === undefined) return res.status(400).json({ error: 'Invalid work experience.' });
+    data.experienceEntries = json;
+  }
+  if (certifications !== undefined) {
+    const json = asJsonString(certifications, 20000);
+    if (json === undefined) return res.status(400).json({ error: 'Invalid certifications.' });
+    data.certifications = json;
   }
 
   const coordinatorFieldsRequested = Object.keys(COORDINATOR_ONLY_FIELDS).filter(k => rest[k] !== undefined);

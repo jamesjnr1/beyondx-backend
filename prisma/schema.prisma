@@ -17,6 +17,17 @@ model Worker {
   offenseNotes   String?
   skills         String[]
   bio            String?
+  // Worker brings their own tools to Facility/Agriculture/site-trade jobs —
+  // drives the +15% tool-provision surcharge in the dispatch pricing (see
+  // beyondx-website src/data.ts TOOL_SURCHARGE_RATE) and the "Has tools"
+  // badge employers see on a worker's card.
+  hasTools       Boolean      @default(false)
+  // JSON: ExperienceEntry[] (see beyondx-website src/pages/WorkerDashboard.tsx
+  // WorkExperienceCard) — private, never shown on the employer-facing profile.
+  experienceEntries String?
+  // JSON: Certification[] — public; shown to employers as "Certified" badges
+  // once BeyondX marks an entry verified.
+  certifications    String?
   dailyCharge    Decimal      @default(80)
   rating         Decimal      @default(0)
   tasksCompleted Int          @default(0)
