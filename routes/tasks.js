@@ -3,6 +3,7 @@ const router = express.Router();
 const jwt = require('jsonwebtoken');
 const { sendSMS } = require('../utils/sms');
 const { calcProximity } = require('../utils/proximity');
+const { sendPushToUser } = require('../lib/push');
 const prisma  = require('../lib/prisma');
 
 // Maps the full category title (as sent by the frontend) to the skill string
@@ -158,6 +159,11 @@ router.post('/', authEmployer, async (req, res) => {
       const intercityTag = prox2.isIntercity ? ' [LONG DISTANCE]' : '';
       const message = `BeyondX: Hi ${firstName}, you have a job offer in ${location} paying GHS ${workerPay}${intercityTag}. Open your dashboard to accept or decline.`;
       sendSMS(task.acceptedBy.phone, message);
+      sendPushToUser({ workerId: task.workerId }, {
+        title: 'New job offer',
+        body: `${taskType} in ${location} — GHS ${workerPay}${intercityTag}`,
+        url: '/',
+      });
     } else if (!workerId) {
       // Open-pool task — notify active, available workers whose skills
       // match this task's category, so it's not silent for everyone.
@@ -169,13 +175,18 @@ router.post('/', authEmployer, async (req, res) => {
             skills: { has: category },
             tasks: { none: { status: { in: ['offered', 'accepted', 'pending_confirmation'] } } }
           },
-          select: { phone: true, fullName: true }
+          select: { id: true, phone: true, fullName: true }
         });
         const openPay = Math.round(parseFloat(task.pay));
         matchingWorkers.forEach(w => {
           const wName = (w.fullName || '').split(' ')[0] || 'there';
           const msg = `BeyondX: Hi ${wName}, a ${taskType} job in ${location} pays GHS ${openPay}. Check your dashboard now.`;
           sendSMS(w.phone, msg);
+          sendPushToUser({ workerId: w.id }, {
+            title: 'New job available',
+            body: `${taskType} in ${location} — GHS ${openPay}`,
+            url: '/',
+          });
         });
       }
     }
@@ -419,10 +430,20 @@ router.patch('/:id/accept-offer', authWorker, async (req, res) => {
     });
     res.json({ task });
 
-    if (task.employer?.phone) {
+    // Push doesn't need a phone number, so it fires independently of the
+    // SMS's own phone check below — an employer with no phone on file can
+    // still have push subscriptions.
+    {
       const workerFirstName = (task.acceptedBy?.fullName || 'The worker').split(' ')[0];
-      const contactFirstName = (task.employer.contactPerson || '').split(' ')[0] || 'there';
-      sendSMS(task.employer.phone, `Hi ${contactFirstName}, BeyondX here. ${workerFirstName} accepted the "${task.taskType}" task and will be dispatched as planned.`);
+      sendPushToUser({ employerId: task.employerId }, {
+        title: 'Offer accepted',
+        body: `${workerFirstName} accepted "${task.taskType}" and will be dispatched.`,
+        url: '/',
+      });
+      if (task.employer?.phone) {
+        const contactFirstName = (task.employer.contactPerson || '').split(' ')[0] || 'there';
+        sendSMS(task.employer.phone, `Hi ${contactFirstName}, BeyondX here. ${workerFirstName} accepted the "${task.taskType}" task and will be dispatched as planned.`);
+      }
     }
 
     // Multi-worker slots: if this task is part of a group (job needing
@@ -441,6 +462,11 @@ router.patch('/:id/accept-offer', authWorker, async (req, res) => {
           });
         }
         const emp = await prisma.employer.findUnique({ where: { id: task.employerId }, select: { phone: true, contactPerson: true } });
+        sendPushToUser({ employerId: task.employerId }, {
+          title: 'Job fully staffed',
+          body: `"${task.taskType}" now has all ${task.slotsNeeded} worker${task.slotsNeeded > 1 ? 's' : ''} confirmed.`,
+          url: '/',
+        });
         if (emp?.phone) {
           const contactFirstName = (emp.contactPerson || '').split(' ')[0] || 'there';
           sendSMS(emp.phone, `Hi ${contactFirstName}, BeyondX here. Your "${task.taskType}" job is now fully staffed — all ${task.slotsNeeded} worker${task.slotsNeeded > 1 ? 's have' : ' has'} been confirmed.`);
@@ -481,11 +507,18 @@ router.patch('/:id/decline-offer', authWorker, async (req, res) => {
     });
     res.json({ task });
 
-    if (existing.employer?.phone) {
+    {
       const workerFirstName = (existing.acceptedBy?.fullName || 'The worker').split(' ')[0];
-      const contactFirstName = (existing.employer.contactPerson || '').split(' ')[0] || 'there';
-      const message = `BeyondX: Hi ${contactFirstName}, ${workerFirstName} declined "${existing.taskType}". We'll find another worker. Check your dashboard.`;
-      sendSMS(existing.employer.phone, message);
+      sendPushToUser({ employerId: existing.employerId }, {
+        title: 'Offer declined',
+        body: `${workerFirstName} declined "${existing.taskType}". We'll find another worker.`,
+        url: '/',
+      });
+      if (existing.employer?.phone) {
+        const contactFirstName = (existing.employer.contactPerson || '').split(' ')[0] || 'there';
+        const message = `BeyondX: Hi ${contactFirstName}, ${workerFirstName} declined "${existing.taskType}". We'll find another worker. Check your dashboard.`;
+        sendSMS(existing.employer.phone, message);
+      }
     }
   } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
@@ -504,11 +537,18 @@ router.patch('/:id/worker-done', authWorker, async (req, res) => {
     res.json({ task });
 
     // Fire-and-forget — don't make the worker wait on this.
-    if (task.employer?.phone) {
+    {
       const workerFirstName = (task.acceptedBy?.fullName || 'Your worker').split(' ')[0];
-      const contactFirstName = (task.employer.contactPerson || '').split(' ')[0] || 'there';
-      const message = `BeyondX: Hi ${contactFirstName}, ${workerFirstName} marked "${task.taskType}" as done. Please confirm in your dashboard so we can pay them.`;
-      sendSMS(task.employer.phone, message);
+      sendPushToUser({ employerId: task.employerId }, {
+        title: 'Job marked done',
+        body: `${workerFirstName} marked "${task.taskType}" as done — confirm to release payment.`,
+        url: '/',
+      });
+      if (task.employer?.phone) {
+        const contactFirstName = (task.employer.contactPerson || '').split(' ')[0] || 'there';
+        const message = `BeyondX: Hi ${contactFirstName}, ${workerFirstName} marked "${task.taskType}" as done. Please confirm in your dashboard so we can pay them.`;
+        sendSMS(task.employer.phone, message);
+      }
     }
   } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });

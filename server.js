@@ -3,6 +3,9 @@ const express = require('express');
 const cors    = require('cors');
 const prisma  = require('./lib/prisma');
 const { ensureSchema } = require('./lib/ensureSchema');
+const { configureWebPush } = require('./lib/push');
+
+configureWebPush();
 
 const app = express();
 app.use(cors());
@@ -19,6 +22,7 @@ app.use('/api/otp', require('./routes/otp'));
 app.use('/api/scope', require('./routes/scope'));
 app.use('/api/coordinators', require('./routes/coordinators'));
 app.use('/api/coordinator-requests', require('./routes/coordinatorRequests'));
+app.use('/api/push', require('./routes/push'));
 
 app.get('/', (req, res) => {
   res.json({ status: 'BeyondX API is running' });

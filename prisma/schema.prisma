@@ -59,6 +59,7 @@ model Worker {
   reviewsReceived Review[] @relation("ReviewsOfWorker")
   scopeDisputesFlagged ScopeDispute[]
   coordinatorJobRequests CoordinatorJobRequest[]
+  pushSubscriptions PushSubscription[]
 }
 
 model Employer {
@@ -81,6 +82,24 @@ model Employer {
   reviewsReceived Review[] @relation("ReviewsOfEmployer")
   taskScopes TaskScope[]
   coordinatorJobRequests CoordinatorJobRequest[]
+  pushSubscriptions PushSubscription[]
+}
+
+// A browser/device's push endpoint for one user. A user can have several
+// (phone + laptop, etc.) — each gets its own row, one per endpoint. Exactly
+// one of workerId/employerId is set, same polymorphic-owner pattern as
+// Review above.
+model PushSubscription {
+  id         String    @id @default(uuid())
+  worker     Worker?   @relation(fields: [workerId], references: [id])
+  workerId   String?
+  employer   Employer? @relation(fields: [employerId], references: [id])
+  employerId String?
+  endpoint   String    @unique
+  p256dh     String
+  auth       String
+  userAgent  String?
+  createdAt  DateTime  @default(now())
 }
 
 model Dispatch {
