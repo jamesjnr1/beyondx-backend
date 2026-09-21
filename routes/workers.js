@@ -47,6 +47,9 @@ router.get('/', async (req, res) => {
         homeArea:       true,
         hasTools:       true,
         certifications: true,
+        priority:       true,
+        featuredTestimonial:       true,
+        featuredTestimonialSource: true,
         tasks: {
           where: { status: { in: ['offered', 'accepted', 'pending_confirmation'] } },
           select: { id: true }
@@ -81,15 +84,18 @@ router.get('/', async (req, res) => {
         }))
       };
     });
-    // When jobLocation is provided, sort: nearby workers first, then by rating
-    if (jobLocation) {
-      flattened.sort((a, b) => {
+    // Priority workers always sort first — a manual staff placement boost,
+    // ahead of proximity/rating either way. Within that, when jobLocation is
+    // provided: nearby workers first, then by rating; otherwise by rating.
+    flattened.sort((a, b) => {
+      if (a.priority !== b.priority) return a.priority ? -1 : 1;
+      if (jobLocation) {
         const da = a.proximity?.roadKm ?? 9999;
         const db = b.proximity?.roadKm ?? 9999;
         if (da !== db) return da - db;
-        return (Number(b.rating) || 0) - (Number(a.rating) || 0);
-      });
-    }
+      }
+      return (Number(b.rating) || 0) - (Number(a.rating) || 0);
+    });
     res.json({ workers: flattened });
   } catch (err) {
     console.error('Fetch workers error:', err);
