@@ -52,6 +52,18 @@ model Worker {
   coordinatorDisputes     String?  // JSON: CoordinatorDispute[]
   coordinatorQuotes       String?  // JSON: Record<taskId, CoordinatorQuote>
   coordinatorPayoutSplits String?  // JSON: Record<taskId, PayoutSplitRecord>
+  // Manual BeyondX-staff placement boost — sorts this worker/coordinator
+  // first in GET /api/workers, within every category they cover. A real,
+  // visible "featured" placement, not a substitute for the rating field
+  // (which stays computed from actual Review rows — see routes/tasks.js's
+  // review endpoint).
+  priority       Boolean      @default(false)
+  // An optional free-text client testimonial BeyondX staff choose to
+  // surface on the profile, shown separately from the numeric star rating
+  // so it's never confused with a review average. featuredTestimonialSource
+  // names who/what it's from (e.g. "Ashaiman clinic client").
+  featuredTestimonial       String?
+  featuredTestimonialSource String?
   createdAt      DateTime     @default(now())
   dispatches     Dispatch[]
   ussdSessions   UssdSession[]

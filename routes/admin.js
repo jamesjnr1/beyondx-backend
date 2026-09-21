@@ -338,6 +338,9 @@ router.get('/workers', adminAuth, async (req, res) => {
         createdAt:      true,
         role:           true,
         coordinatorApplication: true,
+        priority:       true,
+        featuredTestimonial:       true,
+        featuredTestimonialSource: true,
         tasks: {
           where: { status: { in: ['accepted', 'pending_confirmation'] } },
           select: { id: true }
@@ -353,6 +356,29 @@ router.get('/workers', adminAuth, async (req, res) => {
     res.json({ workers: flattened });
   } catch (err) {
     console.error('Fetch admin workers error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PATCH /admin/workers/:id/featured — set (or clear) a worker's manual
+// placement boost and/or a staff-curated client testimonial. Both are
+// separate from the rating field, which stays computed only from real
+// Review rows — this never touches that.
+router.patch('/workers/:id/featured', adminAuth, async (req, res) => {
+  const { priority, featuredTestimonial, featuredTestimonialSource } = req.body || {};
+  try {
+    const worker = await prisma.worker.update({
+      where: { id: req.params.id },
+      data: {
+        ...(priority !== undefined ? { priority: Boolean(priority) } : {}),
+        ...(featuredTestimonial !== undefined ? { featuredTestimonial: featuredTestimonial || null } : {}),
+        ...(featuredTestimonialSource !== undefined ? { featuredTestimonialSource: featuredTestimonialSource || null } : {}),
+      },
+      select: { id: true, workerId: true, fullName: true, priority: true, featuredTestimonial: true, featuredTestimonialSource: true },
+    });
+    res.json({ worker });
+  } catch (err) {
+    console.error('Set worker featured status error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
