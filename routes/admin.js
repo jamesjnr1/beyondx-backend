@@ -3,6 +3,7 @@ const router = express.Router();
 const { sendSMS } = require('../utils/sms');
 const { expireStaleOffers } = require('./tasks');
 const { calcProximity } = require('../utils/proximity');
+const { sendPushToAudience } = require('../lib/push');
 const prisma  = require('../lib/prisma');
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'beyondx2026';
@@ -848,6 +849,32 @@ router.post('/send-dormant-reminders', adminAuth, async (req, res) => {
   } catch (err) {
     console.error('Send dormant reminders error:', err);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /admin/push-broadcast — send a push notification to every device
+// subscribed under the given audience. Called from the website's own
+// api/notifications.js (beyondx-website, Vercel) right after it saves an
+// admin announcement to Supabase, so the existing "send a notification to
+// workers/employers/everyone" admin feature also reaches people as a real
+// push, not just the in-app bell. Kept as its own small endpoint (rather
+// than exposing prisma/PushSubscription directly to that Vercel function)
+// since VAPID keys and PushSubscription storage both live only here.
+router.post('/push-broadcast', adminAuth, async (req, res) => {
+  const audience = String(req.body?.audience || '').trim();
+  const title = String(req.body?.title || '').trim();
+  const body = String(req.body?.body || '').trim();
+  if (!['worker', 'employer', 'all'].includes(audience)) {
+    return res.status(400).json({ error: 'audience must be worker, employer or all.' });
+  }
+  if (!title || !body) return res.status(400).json({ error: 'title and body are required.' });
+
+  try {
+    await sendPushToAudience(audience, { title, body, url: '/' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[admin/push-broadcast]', err.message);
+    res.status(500).json({ error: 'Could not send push notifications.' });
   }
 });
 
