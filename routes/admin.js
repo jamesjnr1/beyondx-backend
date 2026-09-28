@@ -3,7 +3,7 @@ const router = express.Router();
 const { sendSMS } = require('../utils/sms');
 const { expireStaleOffers } = require('./tasks');
 const { calcProximity } = require('../utils/proximity');
-const { sendPushToAudience } = require('../lib/push');
+const { sendPushToAudience, sendPushToUser } = require('../lib/push');
 const prisma  = require('../lib/prisma');
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'beyondx2026';
@@ -85,15 +85,24 @@ router.patch('/tasks/:id/status', adminAuth, async (req, res) => {
       }
     });
 
-    // Job offer SMS — kept to 1 segment (≤160 chars) so it delivers on all networks
-    if (status === 'offered' && task.acceptedBy?.phone) {
-      const firstName = (task.acceptedBy.fullName || '').split(' ')[0] || 'there';
-      const workerCut = Number(task.pay || 0).toFixed(0);
-      const sms = `BeyondX: Hi ${firstName}, new job! ${task.taskType} at ${task.location||'TBD'}, ${task.duration||''}. Pay: GH${workerCut}. Accept/decline: beyondxco.com`;
-      sendSMS(task.acceptedBy.phone, sms);
-    }
-
     res.json({ ok: true, task });
+
+    // Job offer notification — this is where a payment-verified dispatch
+    // actually tells the worker (see the payment_pending comment in
+    // routes/tasks.js POST /).
+    if (status === 'offered' && task.workerId) {
+      const firstName = (task.acceptedBy?.fullName || '').split(' ')[0] || 'there';
+      const workerCut = Number(task.pay || 0).toFixed(0);
+      sendPushToUser({ workerId: task.workerId }, {
+        title: 'New job offer',
+        body: `${task.taskType} at ${task.location || 'TBD'} — GHS ${workerCut}`,
+        url: '/',
+      });
+      if (task.acceptedBy?.phone) {
+        const sms = `BeyondX: Hi ${firstName}, new job! ${task.taskType} at ${task.location||'TBD'}, ${task.duration||''}. Pay: GH${workerCut}. Accept/decline: beyondxco.com`;
+        sendSMS(task.acceptedBy.phone, sms);
+      }
+    }
   } catch (err) {
     if (err.code === 'P2025') return res.status(404).json({ error: 'Task not found.' });
     // Surface the real cause — a hidden generic message here has cost hours
@@ -182,16 +191,22 @@ router.post('/tasks/dispatch-multi', adminAuth, async (req, res) => {
       await prisma.task.update({ where: { id: sourceTaskId }, data: { status: 'cancelled', adminNote: 'Superseded by multi-worker dispatch.' } }).catch(() => null);
     }
 
-    // Notify every candidate worker — 1 segment max so it delivers on all networks
+    res.json({ ok: true, groupId, tasksCreated: created.length });
+
+    // Notify every candidate worker — SMS kept to 1 segment max so it
+    // delivers on all networks.
     for (const task of created) {
+      const workerCut = Number(task.pay || 0).toFixed(0);
+      sendPushToUser({ workerId: task.workerId }, {
+        title: 'New job available',
+        body: `${task.taskType} at ${task.location || 'TBD'} — GHS ${workerCut}. First to accept wins.`,
+        url: '/',
+      });
       if (!task.acceptedBy?.phone) continue;
       const firstName = (task.acceptedBy.fullName || '').split(' ')[0] || 'there';
-      const workerCut = Number(task.pay || 0).toFixed(0);
       const sms = `BeyondX: Hi ${firstName}, new job! ${task.taskType} at ${task.location||'TBD'}, ${task.duration||''}. Pay: GH${workerCut}. First to accept wins: beyondxco.com`;
       sendSMS(task.acceptedBy.phone, sms);
     }
-
-    res.json({ ok: true, groupId, tasksCreated: created.length });
   } catch (err) {
     console.error('[admin] dispatch-multi failed:', err.message);
     res.status(500).json({ error: err.message || 'Server error' });
@@ -216,10 +231,17 @@ router.patch('/tasks/:id/paid', adminAuth, async (req, res) => {
     }
     res.json({ task });
 
-    if (task.acceptedBy?.phone) {
+    if (task.workerId) {
       const paidAmount = Math.round(parseFloat(task.pay));
-      const workerName = (task.acceptedBy.fullName || '').split(' ')[0] || 'there';
-      sendSMS(task.acceptedBy.phone, `BeyondX: Hi ${workerName}, GHS ${paidAmount} has been sent to your Mobile Money. Well done!`);
+      const workerName = (task.acceptedBy?.fullName || '').split(' ')[0] || 'there';
+      sendPushToUser({ workerId: task.workerId }, {
+        title: 'Payment sent',
+        body: `GHS ${paidAmount} has been sent to your Mobile Money. Well done!`,
+        url: '/',
+      });
+      if (task.acceptedBy?.phone) {
+        sendSMS(task.acceptedBy.phone, `BeyondX: Hi ${workerName}, GHS ${paidAmount} has been sent to your Mobile Money. Well done!`);
+      }
     }
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
@@ -599,7 +621,16 @@ router.patch('/coordinator-requests/:id', adminAuth, async (req, res) => {
         data: { status: 'admin_rejected', adminNote: adminNote || null, resolvedAt: new Date() },
         select: CJR_SELECT,
       });
-      return res.json({ request });
+      res.json({ request });
+      sendPushToUser({ workerId: request.coordinatorId }, {
+        title: 'Quote not approved',
+        body: `Your quote for "${request.taskType}" was not approved this time.`,
+        url: '/',
+      });
+      if (request.coordinator?.phone) {
+        sendSMS(request.coordinator.phone, `BeyondX: Your quote for "${request.taskType}" was not approved this time. Check your Coordinator Dashboard for details.`).catch(() => null);
+      }
+      return;
     }
 
     const task = await prisma.task.create({
@@ -663,15 +694,30 @@ router.patch('/disputes/:id', adminAuth, async (req, res) => {
       },
       include: { task: { include: { acceptedBy: { select: { phone: true } }, employer: { select: { phone: true } } } } }
     });
+    res.json({ dispute });
+
     // On approval, notify worker and employer
     if (status === 'approved' && adjustedPrice) {
       const { sendSMS } = require('../utils/sms');
       const workerPhone = dispute.task?.acceptedBy?.phone;
       const empPhone    = dispute.task?.employer?.phone;
+      if (dispute.task?.workerId) {
+        sendPushToUser({ workerId: dispute.task.workerId }, {
+          title: 'Scope change approved',
+          body: `Adjusted pay: GHS ${adjustedPrice}. ${dispute.requiresEmployerConfirm ? 'Awaiting employer confirmation before you resume.' : 'Continue work.'}`,
+          url: '/',
+        });
+      }
       if (workerPhone) sendSMS(workerPhone, `BeyondX: Scope change approved. Adjusted pay: GH${adjustedPrice}. ${dispute.requiresEmployerConfirm ? 'Awaiting employer confirmation before you resume.' : 'Continue work.'}`).catch(() => null);
+      if (dispute.requiresEmployerConfirm && dispute.task?.employerId) {
+        sendPushToUser({ employerId: dispute.task.employerId }, {
+          title: 'Scope change on your job',
+          body: `New price: GHS ${adjustedPrice}. Confirm in your dashboard.`,
+          url: '/',
+        });
+      }
       if (empPhone && dispute.requiresEmployerConfirm) sendSMS(empPhone, `BeyondX: Scope change on your job. New price: GH${adjustedPrice}. Reply to confirm via your dashboard.`).catch(() => null);
     }
-    res.json({ dispute });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

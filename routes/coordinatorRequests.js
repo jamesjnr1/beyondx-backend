@@ -16,6 +16,7 @@ const jwt     = require('jsonwebtoken');
 const router  = express.Router();
 const prisma  = require('../lib/prisma');
 const { sendSMS } = require('../utils/sms');
+const { sendPushToUser } = require('../lib/push');
 
 function authEmployer(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
@@ -79,10 +80,16 @@ router.post('/', authEmployer, async (req, res) => {
       select: REQUEST_SELECT,
     });
 
+    res.status(201).json({ request });
+
+    sendPushToUser({ workerId: coordinator.id }, {
+      title: 'New job request',
+      body: `${taskType} in ${location}. Review and submit your price in your Coordinator Dashboard.`,
+      url: '/',
+    });
     if (coordinator.phone) {
       sendSMS(coordinator.phone, `BeyondX: New job request — ${taskType} in ${location}. Review and submit your price in your Coordinator Dashboard.`).catch(() => null);
     }
-    res.status(201).json({ request });
   } catch (err) {
     console.error('Create coordinator request error:', err);
     res.status(500).json({ error: 'Server error' });
@@ -135,6 +142,15 @@ router.patch('/:id/quote', authWorker, async (req, res) => {
       select: REQUEST_SELECT,
     });
     res.json({ request });
+
+    sendPushToUser({ employerId: request.employerId }, {
+      title: 'Quote received',
+      body: `Your coordinator quoted GHS ${parsedPrice} for "${request.taskType}". Review it in your dashboard.`,
+      url: '/',
+    });
+    if (request.employer?.phone) {
+      sendSMS(request.employer.phone, `BeyondX: Your coordinator quoted GHS ${parsedPrice} for "${request.taskType}". Review it in your Employer Dashboard.`).catch(() => null);
+    }
   } catch (err) {
     console.error('Quote coordinator request error:', err);
     res.status(500).json({ error: 'Server error' });
@@ -154,6 +170,15 @@ router.patch('/:id/decline', authWorker, async (req, res) => {
       select: REQUEST_SELECT,
     });
     res.json({ request });
+
+    sendPushToUser({ employerId: request.employerId }, {
+      title: 'Coordinator declined',
+      body: `Your coordinator declined "${request.taskType}". Try another coordinator or post it as an open job.`,
+      url: '/',
+    });
+    if (request.employer?.phone) {
+      sendSMS(request.employer.phone, `BeyondX: Your coordinator declined "${request.taskType}". Try another coordinator or post it as an open job from your dashboard.`).catch(() => null);
+    }
   } catch (err) {
     console.error('Decline coordinator request error:', err);
     res.status(500).json({ error: 'Server error' });
