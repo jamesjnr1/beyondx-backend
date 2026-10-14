@@ -621,6 +621,9 @@ router.patch('/:id/decline-offer', authWorker, async (req, res) => {
 // PATCH /api/tasks/:id/worker-done — worker marks task as done
 router.patch('/:id/worker-done', authWorker, async (req, res) => {
   try {
+    const own = await prisma.task.findUnique({ where: { id: req.params.id }, select: { workerId: true, status: true } });
+    if (!own || own.workerId !== req.workerId) return res.status(404).json({ error: 'Task not found' });
+    if (own.status !== 'accepted') return res.status(409).json({ error: 'This job is not in progress.' });
     const task = await prisma.task.update({
       where: { id: req.params.id },
       data: { status: 'pending_confirmation' },
@@ -651,10 +654,21 @@ router.patch('/:id/worker-done', authWorker, async (req, res) => {
 // PATCH /api/tasks/:id/complete — employer confirms work is done (moves to pending_confirmation for admin to pay)
 router.patch('/:id/complete', authEmployer, async (req, res) => {
   try {
+    const own = await prisma.task.findUnique({ where: { id: req.params.id }, select: { employerId: true, status: true } });
+    if (!own || own.employerId !== req.employerId) return res.status(404).json({ error: 'Task not found' });
+    if (own.status !== 'pending_confirmation') return res.status(409).json({ error: 'The Xpert has not marked this job done yet.' });
     const task = await prisma.task.update({
       where: { id: req.params.id },
       data: { status: 'employer_confirmed' }
     });
+    // Multi-Xpert job: once every Xpert's part is confirmed, close the parent job too.
+    if (task.groupId) {
+      const parent = await prisma.task.findUnique({ where: { id: task.groupId }, select: { slotsNeeded: true, status: true } });
+      const done = await prisma.task.count({ where: { groupId: task.groupId, status: { in: ['employer_confirmed', 'completed'] } } });
+      if (parent && parent.status === 'accepted' && done >= (parent.slotsNeeded || 1)) {
+        await prisma.task.update({ where: { id: task.groupId }, data: { status: 'completed' } }); // payouts happen per Xpert row
+      }
+    }
     res.json({ task });
   } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
