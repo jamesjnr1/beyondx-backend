@@ -29,7 +29,7 @@ router.get('/', async (req, res) => {
   try {
     const { jobLocation } = req.query; // optional: ?jobLocation=Tema
     const workers = await prisma.worker.findMany({
-      where: { isActive: true },
+      where: { isActive: true, accountStatus: 'active' },
       select: {
         id:             true,
         workerId:       true,
@@ -117,9 +117,12 @@ router.get('/me', authWorker, async (req, res) => {
         experienceEntries: true, certifications: true,
         role: true, coordinatorApplication: true, coordinatorTeam: true,
         coordinatorDisputes: true, coordinatorQuotes: true, coordinatorPayoutSplits: true,
+        accountStatus: true, applicationNote: true, idType: true, idDocumentUrl: true,
+        referenceName: true, referencePhone: true, referenceRelationship: true,
+        skillEvidenceUrls: true, experienceSummary: true,
         reviewsReceived: {
           where: { fromRole: 'employer' },
-          select: { rating: true, comment: true, createdAt: true },
+          select: { rating: true, skillsRating: true, professionalismRating: true, comment: true, createdAt: true },
           orderBy: { createdAt: 'desc' }
         }
       }

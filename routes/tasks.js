@@ -76,6 +76,56 @@ function authWorker(req, res, next) {
   } catch { res.status(401).json({ error: 'Invalid token' }); }
 }
 
+// Xperts who haven't been approved by BeyondX (or have been suspended) can
+// log in to see their application status, but can't see or take jobs.
+async function isActiveWorker(workerId) {
+  const w = await prisma.worker.findUnique({ where: { id: workerId }, select: { accountStatus: true, isActive: true } });
+  return !!w && w.isActive && (w.accountStatus || 'active') === 'active';
+}
+
+async function requireActiveWorker(req, res, next) {
+  try {
+    if (!(await isActiveWorker(req.workerId))) {
+      return res.status(403).json({ error: 'Your BeyondX account is not active yet. You can take jobs once your application is approved.' });
+    }
+    next();
+  } catch (err) {
+    console.error('[requireActiveWorker]', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+}
+
+// Tell active, available Xperts whose skills match that an open task is
+// available. Used once an invoiced task has been paid and verified.
+async function notifyMatchingWorkers(task) {
+  const category = categoryForTaskType(task.taskType);
+  if (!category) return;
+  try {
+    const matchingWorkers = await prisma.worker.findMany({
+      where: {
+        isActive: true,
+        accountStatus: 'active',
+        skills: { has: category },
+        tasks: { none: { status: { in: ['offered', 'accepted', 'pending_confirmation'] } } }
+      },
+      select: { id: true, phone: true, fullName: true }
+    });
+    const openPay = Math.round(parseFloat(task.pay));
+    matchingWorkers.forEach(w => {
+      const wName = (w.fullName || '').split(' ')[0] || 'there';
+      sendSMS(w.phone, `BeyondX: Hi ${wName}, a ${task.taskType} job in ${task.location} pays GHS ${openPay}. Check your dashboard now.`);
+      sendPushToUser({ workerId: w.id }, {
+        title: 'New job available',
+        body: `${task.taskType} in ${task.location} — GHS ${openPay}`,
+        url: '/',
+      });
+    });
+  } catch (err) {
+    console.error('[notifyMatchingWorkers]', err.message);
+  }
+}
+router.notifyMatchingWorkers = notifyMatchingWorkers;
+
 // Accepts a token from EITHER a worker or an employer — used for the review
 // endpoint, since both sides submit through the same route.
 function authEitherParty(req, res, next) {
@@ -97,8 +147,11 @@ function authEitherParty(req, res, next) {
 // for them via the dispatch flow), the task is assigned directly to that
 // worker instead of being left open, and the worker gets a confirmation SMS.
 router.post('/', authEmployer, async (req, res) => {
-  const { taskType, description, location, duration, pay, workerId, paymentRef, workersNeeded, scheduledDate, scheduledTime, transportAllowance: frontendTransport } = req.body;
-  if (!taskType || !location || !pay) return res.status(400).json({ error: 'taskType, location and pay are required' });
+  const { taskType, description, location, duration, pay, workerId, paymentRef, workersNeeded, scheduledDate, scheduledTime, transportAllowance: frontendTransport, durationHours, premium } = req.body;
+  if (!taskType || !location) return res.status(400).json({ error: 'taskType and location are required' });
+  // A direct dispatch carries its price; a posted request is priced later by
+  // BeyondX via an invoice, so it has no pay yet.
+  if (workerId && !pay) return res.status(400).json({ error: 'pay is required when dispatching a specific worker' });
   try {
     if (workerId) {
       const activeTask = await prisma.task.findFirst({
@@ -115,7 +168,9 @@ router.post('/', authEmployer, async (req, res) => {
       description: description || '',
       location,
       duration: duration || '1 day',
-      pay: parseFloat(pay),
+      pay: parseFloat(pay) || 0,
+      ...(durationHours ? { durationHours: parseFloat(durationHours) } : {}),
+      premium: !!premium,
       ...(workersNeeded && workersNeeded > 1 ? { slotsNeeded: parseInt(workersNeeded, 10) } : {}),
       ...(paymentRef ? { paymentRef } : {}),
       ...(scheduledDate ? { scheduledDate } : {}),
@@ -138,6 +193,10 @@ router.post('/', authEmployer, async (req, res) => {
       // If the employer submitted payment details, hold as payment_pending until
       // BeyondX manually verifies the payment before notifying the worker.
       data.status = req.body.status === 'payment_pending' ? 'payment_pending' : 'offered';
+    } else {
+      // Posted request: held for BeyondX to review and invoice. Xperts are
+      // only notified once the employer has paid the invoice.
+      data.status = 'awaiting_invoice';
     }
 
     const task = await prisma.task.create({
@@ -164,31 +223,6 @@ router.post('/', authEmployer, async (req, res) => {
         body: `${taskType} in ${location} — GHS ${workerPay}${intercityTag}`,
         url: '/',
       });
-    } else if (!workerId) {
-      // Open-pool task — notify active, available workers whose skills
-      // match this task's category, so it's not silent for everyone.
-      const category = categoryForTaskType(taskType);
-      if (category) {
-        const matchingWorkers = await prisma.worker.findMany({
-          where: {
-            isActive: true,
-            skills: { has: category },
-            tasks: { none: { status: { in: ['offered', 'accepted', 'pending_confirmation'] } } }
-          },
-          select: { id: true, phone: true, fullName: true }
-        });
-        const openPay = Math.round(parseFloat(task.pay));
-        matchingWorkers.forEach(w => {
-          const wName = (w.fullName || '').split(' ')[0] || 'there';
-          const msg = `BeyondX: Hi ${wName}, a ${taskType} job in ${location} pays GHS ${openPay}. Check your dashboard now.`;
-          sendSMS(w.phone, msg);
-          sendPushToUser({ workerId: w.id }, {
-            title: 'New job available',
-            body: `${taskType} in ${location} — GHS ${openPay}`,
-            url: '/',
-          });
-        });
-      }
     }
 
     res.status(201).json({ task });
@@ -210,7 +244,7 @@ router.patch('/:id/cancel', authEmployer, async (req, res) => {
     if (!task || task.employerId !== req.employerId) {
       return res.status(404).json({ error: 'Task not found.' });
     }
-    if (!['open', 'payment_pending'].includes(task.status)) {
+    if (!['awaiting_invoice', 'invoice_sent', 'open', 'payment_pending'].includes(task.status)) {
       return res.status(400).json({ error: 'This job can no longer be cancelled — a worker has already been matched to it. Contact support if you need to stop it.' });
     }
     const updated = await prisma.task.update({
@@ -246,6 +280,60 @@ router.patch('/:id/payment-ref', authEmployer, async (req, res) => {
   }
 });
 
+// PATCH /api/tasks/:id/pay-invoice — employer submits the MoMo reference for
+// the invoice BeyondX sent. Moves the task to payment_pending for staff to
+// verify in the admin dashboard (Verify Payments), after which it opens to
+// Xperts.
+router.patch('/:id/pay-invoice', authEmployer, async (req, res) => {
+  const paymentRef = String(req.body.paymentRef || '').trim();
+  if (!paymentRef) return res.status(400).json({ error: 'A payment reference is required.' });
+  try {
+    const task = await prisma.task.findUnique({ where: { id: req.params.id }, select: { id: true, employerId: true, status: true } });
+    if (!task || task.employerId !== req.employerId) return res.status(404).json({ error: 'Task not found.' });
+    if (task.status !== 'invoice_sent') return res.status(409).json({ error: 'This job has no invoice awaiting payment.' });
+    const updated = await prisma.task.update({ where: { id: task.id }, data: { status: 'payment_pending', paymentRef } });
+    res.json({ task: updated });
+  } catch (err) {
+    console.error('[tasks] pay-invoice failed:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PATCH /api/tasks/:id/decline-invoice — employer declines the invoice; the
+// request is closed. They can post a new one at any time.
+router.patch('/:id/decline-invoice', authEmployer, async (req, res) => {
+  try {
+    const task = await prisma.task.findUnique({ where: { id: req.params.id }, select: { id: true, employerId: true, status: true } });
+    if (!task || task.employerId !== req.employerId) return res.status(404).json({ error: 'Task not found.' });
+    if (task.status !== 'invoice_sent') return res.status(409).json({ error: 'This job has no invoice to decline.' });
+    const updated = await prisma.task.update({ where: { id: task.id }, data: { status: 'cancelled', adminNote: 'Invoice declined by employer' } });
+    res.json({ task: updated });
+  } catch (err) {
+    console.error('[tasks] decline-invoice failed:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/tasks/:id/report — an Xpert reports something on site that
+// differs from what was agreed, or a safety concern.
+router.post('/:id/report', authWorker, async (req, res) => {
+  const category = ['scope_change', 'safety', 'other'].includes(req.body.category) ? req.body.category : null;
+  const description = String(req.body.description || '').trim();
+  if (!category) return res.status(400).json({ error: 'Choose what the report is about.' });
+  if (description.length < 5) return res.status(400).json({ error: 'Please describe what happened.' });
+  try {
+    const task = await prisma.task.findUnique({ where: { id: req.params.id }, select: { id: true, workerId: true } });
+    if (!task || task.workerId !== req.workerId) return res.status(404).json({ error: 'Task not found.' });
+    const report = await prisma.siteReport.create({
+      data: { taskId: task.id, workerId: req.workerId, category, description: description.slice(0, 2000) },
+    });
+    res.status(201).json({ report });
+  } catch (err) {
+    console.error('[tasks] report failed:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // GET /api/tasks — fetch open tasks for workers
 router.get('/', async (req, res) => {
   try {
@@ -260,12 +348,19 @@ router.get('/', async (req, res) => {
       }
     } catch { /* unauthenticated is fine */ }
 
+    if (currentWorkerId && !(await isActiveWorker(currentWorkerId))) {
+      return res.json({ tasks: [] });
+    }
+
     const tasks = await prisma.task.findMany({
       where: {
         status: 'open',
-        // For multi-slot tasks, hide ones the current worker already accepted
+        // Hide tasks already assigned to this worker. Written as an explicit
+        // OR because `NOT { workerId: X }` evaluates to NULL (and drops the
+        // row) when workerId IS NULL — which hid every unassigned open task
+        // from logged-in workers.
         ...(currentWorkerId ? {
-          NOT: { groupId: null, workerId: currentWorkerId }
+          OR: [{ workerId: null }, { workerId: { not: currentWorkerId } }],
         } : {}),
       },
       include: { employer: { select: { orgName: true, contactPerson: true, phone: true, address: true } } },
@@ -294,7 +389,7 @@ router.get('/all', authEmployer, async (req, res) => {
         groupId: null,  // exclude personal worker rows (they have groupId = parent task id)
       },
       include: {
-        acceptedBy: { select: { fullName: true, workerId: true, phone: true } },
+        acceptedBy: { select: { fullName: true, workerId: true, phone: true, rating: true } },
         reviews: true,
       },
       orderBy: { createdAt: 'desc' }
@@ -305,7 +400,7 @@ router.get('/all', authEmployer, async (req, res) => {
       if ((t.slotsNeeded || 1) <= 1) return t;
       const workerRows = await prisma.task.findMany({
         where: { groupId: t.id },
-        select: { id: true, status: true, workerId: true, acceptedBy: { select: { fullName: true, phone: true } } }
+        select: { id: true, status: true, workerId: true, reviews: true, acceptedBy: { select: { fullName: true, phone: true, rating: true } } }
       });
       return { ...t, acceptedWorkers: workerRows };
     }));
@@ -322,7 +417,7 @@ router.get('/mine', authWorker, async (req, res) => {
     await expireStaleOffers();
     const tasks = await prisma.task.findMany({
       where: { workerId: req.workerId, status: { in: ['offered', 'accepted', 'pending_confirmation', 'payment_pending', 'employer_confirmed'] } },
-      include: { employer: { select: { orgName: true, contactPerson: true, phone: true, address: true } }, reviews: true },
+      include: { employer: { select: { orgName: true, contactPerson: true, phone: true, address: true, rating: true } }, reviews: true },
       orderBy: { createdAt: 'desc' }
     });
     res.json({ tasks });
@@ -332,7 +427,7 @@ router.get('/mine', authWorker, async (req, res) => {
 });
 
 // PATCH /api/tasks/:id/accept — worker accepts an open task
-router.patch('/:id/accept', authWorker, async (req, res) => {
+router.patch('/:id/accept', authWorker, requireActiveWorker, async (req, res) => {
   try {
     const existing = await prisma.task.findUnique({ where: { id: req.params.id } });
     if (!existing || existing.status !== 'open') {
@@ -398,7 +493,7 @@ router.patch('/:id/accept', authWorker, async (req, res) => {
 });
 
 // PATCH /api/tasks/:id/accept-offer — worker accepts a direct dispatch offer
-router.patch('/:id/accept-offer', authWorker, async (req, res) => {
+router.patch('/:id/accept-offer', authWorker, requireActiveWorker, async (req, res) => {
   try {
     const existing = await prisma.task.findUnique({ where: { id: req.params.id } });
     // Specific, honest reasons instead of one generic message — this was
@@ -575,6 +670,9 @@ router.post('/:id/review', authEitherParty, async (req, res) => {
   if (!numRating || numRating < 1 || numRating > 5) {
     return res.status(400).json({ error: 'Rating must be a number between 1 and 5.' });
   }
+  const inRange = (n) => Number.isInteger(n) && n >= 1 && n <= 5;
+  const skillsRating = parseInt(req.body.skillsRating, 10);
+  const professionalismRating = parseInt(req.body.professionalismRating, 10);
   try {
     const task = await prisma.task.findUnique({ where: { id: req.params.id } });
     if (!task) return res.status(404).json({ error: 'Task not found.' });
@@ -588,6 +686,10 @@ router.post('/:id/review', authEitherParty, async (req, res) => {
       if (task.employerId !== req.userId) return res.status(403).json({ error: 'This is not your task.' });
     }
 
+    if (req.role === 'employer' && (!inRange(skillsRating) || !inRange(professionalismRating))) {
+      return res.status(400).json({ error: 'Please rate skills and professionalism (1 to 5).' });
+    }
+
     const existing = await prisma.review.findUnique({
       where: { taskId_fromRole: { taskId: task.id, fromRole: req.role } }
     });
@@ -598,6 +700,7 @@ router.post('/:id/review', authEitherParty, async (req, res) => {
         taskId: task.id,
         fromRole: req.role,
         rating: numRating,
+        ...(req.role === 'employer' ? { skillsRating, professionalismRating } : {}),
         comment,
         // The review is ABOUT whichever party did not write it.
         workerId: req.role === 'employer' ? task.workerId : null,
@@ -639,7 +742,7 @@ router.get('/worker-history', authWorker, async (req, res) => {
   try {
     const tasks = await prisma.task.findMany({
       where: { workerId: req.workerId, status: 'completed' },
-      include: { employer: { select: { orgName: true } }, reviews: true },
+      include: { employer: { select: { orgName: true, rating: true } }, reviews: true },
       orderBy: { createdAt: 'desc' }
     });
     res.json({ tasks });
