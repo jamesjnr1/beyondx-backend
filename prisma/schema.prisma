@@ -64,6 +64,20 @@ model Worker {
   // names who/what it's from (e.g. "Ashaiman clinic client").
   featuredTestimonial       String?
   featuredTestimonialSource String?
+  // Closed-loop onboarding: new sign-ups start 'under_review' and can't see
+  // or accept jobs until BeyondX approves them in the admin dashboard.
+  // Existing accounts default to 'active'. Values: under_review | active |
+  // suspended | rejected.
+  accountStatus          String    @default("active")
+  idDocumentUrl          String?
+  referenceName          String?
+  referencePhone         String?
+  referenceRelationship  String?
+  skillEvidenceUrls      String[]  @default([])
+  experienceSummary      String?
+  applicationNote        String?   // staff note shown to the applicant on rejection/suspension
+  activatedAt            DateTime?
+  activatedBy            String?
   createdAt      DateTime     @default(now())
   dispatches     Dispatch[]
   ussdSessions   UssdSession[]
@@ -72,6 +86,7 @@ model Worker {
   scopeDisputesFlagged ScopeDispute[]
   coordinatorJobRequests CoordinatorJobRequest[]
   pushSubscriptions PushSubscription[]
+  siteReports SiteReport[]
 }
 
 model Employer {
@@ -194,8 +209,18 @@ model Task {
   scheduledTime  String?    // e.g. "08:00" — time worker should arrive
   reminderSentAt       DateTime?  // set once the 1-hour-before reminder SMS fires
   morningReminderSentAt DateTime?
+  // Invoice flow: an employer-posted task starts 'awaiting_invoice'; BeyondX
+  // reviews it and sets invoiceAmount (what the employer pays) and pay
+  // (what the Xpert receives), moving it to 'invoice_sent'. The employer
+  // then pays (payment_pending) and, once verified, it opens to Xperts.
+  invoiceAmount  Decimal?
+  invoiceNote    String?
+  invoiceSentAt  DateTime?
+  durationHours  Float?
+  premium        Boolean   @default(false) // job starts within 48 hours of posting
 
   scope          TaskScope?
+  siteReports    SiteReport[]
   disputes       ScopeDispute[]
 
   @@index([groupId])
@@ -211,6 +236,9 @@ model Review {
   taskId      String
   fromRole    ReviewerRole
   rating      Int
+  // Employer-on-Xpert reviews also score skills and professionalism.
+  skillsRating          Int?
+  professionalismRating Int?
   comment     String?
   worker      Worker?      @relation("ReviewsOfWorker", fields: [workerId], references: [id])
   workerId    String?
@@ -227,6 +255,8 @@ enum ReviewerRole {
 }
 
 enum TaskStatus {
+  awaiting_invoice
+  invoice_sent
   open
   payment_pending
   offered
@@ -460,4 +490,23 @@ model CoordinatorJobRequest {
 
   @@index([coordinatorId])
   @@index([employerId])
+}
+
+// Something an Xpert observed on site that differs from what was agreed, or
+// a safety concern. Goes to BeyondX staff via the admin dashboard.
+model SiteReport {
+  id          String    @id @default(uuid())
+  task        Task      @relation(fields: [taskId], references: [id])
+  taskId      String
+  worker      Worker    @relation(fields: [workerId], references: [id])
+  workerId    String
+  category    String    // scope_change | safety | other
+  description String
+  status      String    @default("open") // open | resolved
+  adminNote   String?
+  createdAt   DateTime  @default(now())
+  resolvedAt  DateTime?
+
+  @@index([status])
+  @@index([taskId])
 }

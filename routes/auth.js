@@ -60,7 +60,7 @@ async function sendWelcomeEmail(email, orgName, contactPerson) {
 
 async function sendWelcomeSMS(phone, fullName) {
   const firstName = (fullName || '').split(' ')[0] || 'there';
-  await sendSMS(phone, `Hi ${firstName}, welcome to BeyondX! Your account is ready. We're growing the platform daily and will text you as soon as a task matches your skills.`);
+  await sendSMS(phone, `Hi ${firstName}, thanks for applying to BeyondX. Our team is reviewing your application and will text you once you are approved as an Xpert.`);
 }
 
 function authEmployer(req, res, next) {
@@ -101,7 +101,7 @@ router.get('/employer-profile', authEmployer, async (req, res) => {
         comment: r.comment,
         createdAt: r.createdAt,
         taskType: r.task?.taskType || null,
-        reviewerName: r.task?.acceptedBy?.fullName || 'A BeyondX Worker'
+        reviewerName: r.task?.acceptedBy?.fullName || 'A BeyondX Xpert'
       }));
     }
     res.json({ employer });
@@ -181,6 +181,7 @@ router.post('/worker-login', async (req, res) => {
       select: {
         id: true, workerId: true, fullName: true, phone: true, pinHash: true,
         tasksCompleted: true, totalEarned: true, rating: true, skills: true,
+        accountStatus: true, applicationNote: true,
       },
     });
     if (!worker) return res.status(401).json({ error: 'No account found with that phone number.' });
@@ -223,7 +224,9 @@ router.post('/worker-login', async (req, res) => {
     tasksCompleted: worker.tasksCompleted,
     totalEarned: worker.totalEarned,
     rating: worker.rating,
-    skills: worker.skills
+    skills: worker.skills,
+    accountStatus: worker.accountStatus,
+    applicationNote: worker.applicationNote
   }
 });
   } catch (err) {
@@ -466,7 +469,11 @@ router.post('/employer-register', async (req, res) => {
 
 // POST /api/auth/worker-register
 router.post('/worker-register', async (req, res) => {
-  const { fullName, phone, prisonFacility, skills, pin, guarantorName, guarantorPhone, guarantorRelationship, visitorId, homeArea } = req.body;
+  const {
+    fullName, phone, prisonFacility, skills, pin, guarantorName, guarantorPhone, guarantorRelationship, visitorId, homeArea,
+    idType, idCardNumber, idDocumentUrl, experienceSummary,
+    referenceName, referencePhone, referenceRelationship, skillEvidenceUrls,
+  } = req.body;
 
   if (!fullName || !pin) {
     return res.status(400).json({ error: 'Full name and PIN are required' });
@@ -487,6 +494,22 @@ router.post('/worker-register', async (req, res) => {
   if (!/^0[2357]\d{8}$/.test(guarantorPhone)) {
     return res.status(400).json({ error: 'Please provide a valid Ghana phone number for the guarantor.' });
   }
+  // Full Xpert application — everything BeyondX needs to review before
+  // approving the account in the admin dashboard.
+  const isHttps = (u) => typeof u === 'string' && u.startsWith('https://');
+  const evidence = Array.isArray(skillEvidenceUrls) ? skillEvidenceUrls.filter(isHttps).slice(0, 10) : [];
+  if (!Array.isArray(skills) || skills.length === 0) return res.status(400).json({ error: 'Select at least one skill.' });
+  if (!homeArea || !String(homeArea).trim()) return res.status(400).json({ error: 'Your home area is required.' });
+  if (!idType || !idCardNumber) return res.status(400).json({ error: 'ID type and ID number are required.' });
+  if (!isHttps(idDocumentUrl)) return res.status(400).json({ error: 'A photo of your ID is required.' });
+  if (!experienceSummary || String(experienceSummary).trim().length < 10) return res.status(400).json({ error: 'Please describe your work experience.' });
+  if (!referenceName || !referencePhone || !referenceRelationship) return res.status(400).json({ error: 'Reference name, phone and relationship are required.' });
+  if (!/^0[2357]\d{8}$/.test(referencePhone)) return res.status(400).json({ error: 'Please provide a valid Ghana phone number for your reference.' });
+  if (referencePhone === guarantorPhone) return res.status(400).json({ error: 'Your reference must be a different person from your guarantor.' });
+  if (/family|relative|brother|sister|mother|father|parent|spouse|wife|husband|cousin|uncle|aunt/i.test(referenceRelationship)) {
+    return res.status(400).json({ error: 'Your reference cannot be a family member. Choose a past employer or someone in your trade.' });
+  }
+  if (evidence.length === 0) return res.status(400).json({ error: 'Upload at least one photo of your previous work.' });
 
   try {
     const pinHash = await bcrypt.hash(pin, 10);
@@ -531,6 +554,15 @@ router.post('/worker-register', async (req, res) => {
             guarantorPhone,
             guarantorRelationship: guarantorRelationship || null,
             homeArea: homeArea ? homeArea.trim() : null,
+            idType: String(idType).slice(0, 50),
+            idCardNumber: String(idCardNumber).slice(0, 50),
+            idDocumentUrl,
+            experienceSummary: String(experienceSummary).trim().slice(0, 2000),
+            referenceName: String(referenceName).trim().slice(0, 100),
+            referencePhone,
+            referenceRelationship: String(referenceRelationship).trim().slice(0, 100),
+            skillEvidenceUrls: evidence,
+            accountStatus: 'under_review',
           }
         });
         break; // success
@@ -562,7 +594,8 @@ router.post('/worker-register', async (req, res) => {
     totalEarned:    worker.totalEarned,
     rating:         worker.rating,
     gpsVerified:    worker.gpsVerified,
-    skills:         worker.skills
+    skills:         worker.skills,
+    accountStatus:  worker.accountStatus
   }
 });
 

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { sendSMS } = require('../utils/sms');
-const { expireStaleOffers } = require('./tasks');
+const { expireStaleOffers, notifyMatchingWorkers } = require('./tasks');
 const { calcProximity } = require('../utils/proximity');
 const { sendPushToAudience, sendPushToUser } = require('../lib/push');
 const prisma  = require('../lib/prisma');
@@ -54,11 +54,22 @@ router.get('/all', adminAuth, async (req, res) => {
 // PATCH /admin/tasks/:id/status — set task status directly (used by verify-payments flow)
 router.patch('/tasks/:id/status', adminAuth, async (req, res) => {
   const { status, adminNote, workerId } = req.body;
-  const allowed = ['offered', 'payment_pending', 'payment_rejected', 'accepted', 'completed', 'pending_confirmation', 'employer_confirmed', 'open', 'cancelled', 'expired'];
+  const allowed = ['awaiting_invoice', 'invoice_sent', 'offered', 'payment_pending', 'payment_rejected', 'accepted', 'completed', 'pending_confirmation', 'employer_confirmed', 'open', 'cancelled', 'expired'];
   if (!status || !allowed.includes(status)) {
     return res.status(400).json({ error: `status must be one of: ${allowed.join(', ')}` });
   }
   try {
+    // Verify Payments sends 'offered'. For a paid invoice there's no Xpert
+    // assigned yet, so the task opens to matching Xperts instead.
+    let finalStatus = status;
+    let openedFromInvoice = false;
+    if (status === 'offered' && !workerId) {
+      const current = await prisma.task.findUnique({ where: { id: req.params.id }, select: { workerId: true, status: true } });
+      if (current && !current.workerId) {
+        finalStatus = 'open';
+        openedFromInvoice = current.status === 'payment_pending';
+      }
+    }
     // Auto-compute transport allowance when assigning a worker to a task.
     let transportAllowance = undefined;
     if (status === 'offered' && workerId) {
@@ -74,7 +85,7 @@ router.patch('/tasks/:id/status', adminAuth, async (req, res) => {
     const task = await prisma.task.update({
       where: { id: req.params.id },
       data: {
-        status,
+        status: finalStatus,
         ...(adminNote ? { adminNote } : {}),
         ...(workerId ? { workerId } : {}),
         ...(transportAllowance !== undefined ? { transportAllowance } : {}),
@@ -87,10 +98,19 @@ router.patch('/tasks/:id/status', adminAuth, async (req, res) => {
 
     res.json({ ok: true, task });
 
+    if (openedFromInvoice) {
+      notifyMatchingWorkers(task);
+      sendPushToUser({ employerId: task.employerId }, {
+        title: 'Payment confirmed',
+        body: `We're now matching Xperts to "${task.taskType}".`,
+        url: '/',
+      });
+    }
+
     // Job offer notification — this is where a payment-verified dispatch
     // actually tells the worker (see the payment_pending comment in
     // routes/tasks.js POST /).
-    if (status === 'offered' && task.workerId) {
+    if (finalStatus === 'offered' && task.workerId) {
       const firstName = (task.acceptedBy?.fullName || '').split(' ')[0] || 'there';
       const workerCut = Number(task.pay || 0).toFixed(0);
       sendPushToUser({ workerId: task.workerId }, {
@@ -947,6 +967,170 @@ router.post('/push-broadcast', adminAuth, async (req, res) => {
   } catch (err) {
     console.error('[admin/push-broadcast]', err.message);
     res.status(500).json({ error: 'Could not send push notifications.' });
+  }
+});
+
+
+// ── INVOICES ───────────────────────────────────────────────────────────────
+// Employer-posted requests wait here ('awaiting_invoice') for staff to review
+// and price. Sending an invoice sets what the employer pays (invoiceAmount)
+// and what the Xpert receives (pay).
+
+// GET /admin/invoices?status=awaiting_invoice|invoice_sent|all
+router.get('/invoices', adminAuth, async (req, res) => {
+  const status = req.query.status;
+  const where = status && status !== 'all'
+    ? { status }
+    : { status: { in: ['awaiting_invoice', 'invoice_sent'] } };
+  try {
+    const tasks = await prisma.task.findMany({
+      where: { ...where, groupId: null },
+      include: { employer: { select: { orgName: true, contactPerson: true, phone: true, email: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+    res.json({ tasks });
+  } catch (err) {
+    console.error('[admin] invoices failed:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PATCH /admin/tasks/:id/invoice — body { amount, workerPay, note? }
+router.patch('/tasks/:id/invoice', adminAuth, async (req, res) => {
+  const amount = parseFloat(req.body.amount);
+  const workerPay = parseFloat(req.body.workerPay);
+  const note = req.body.note ? String(req.body.note).trim().slice(0, 1000) : null;
+  if (!(amount > 0)) return res.status(400).json({ error: 'Invoice amount must be greater than 0.' });
+  if (!(workerPay > 0) || workerPay > amount) return res.status(400).json({ error: 'Xpert pay must be greater than 0 and no more than the invoice amount.' });
+  try {
+    const existing = await prisma.task.findUnique({ where: { id: req.params.id }, select: { status: true } });
+    if (!existing) return res.status(404).json({ error: 'Task not found.' });
+    if (!['awaiting_invoice', 'invoice_sent'].includes(existing.status)) {
+      return res.status(409).json({ error: 'This task is not awaiting an invoice.' });
+    }
+    const task = await prisma.task.update({
+      where: { id: req.params.id },
+      data: { status: 'invoice_sent', invoiceAmount: amount, pay: workerPay, invoiceNote: note, invoiceSentAt: new Date() },
+      include: { employer: { select: { phone: true, contactPerson: true } } },
+    });
+    res.json({ task });
+    sendPushToUser({ employerId: task.employerId }, {
+      title: 'Your invoice is ready',
+      body: `"${task.taskType}" — GHS ${amount.toFixed(2)}. Review and pay in your dashboard.`,
+      url: '/',
+    });
+    if (task.employer?.phone) {
+      const first = (task.employer.contactPerson || '').split(' ')[0] || 'there';
+      sendSMS(task.employer.phone, `BeyondX: Hi ${first}, your invoice for "${task.taskType}" is GHS ${amount.toFixed(2)}. Review and pay in your dashboard: beyondxco.com`);
+    }
+  } catch (err) {
+    console.error('[admin] invoice failed:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── XPERT APPLICATIONS ─────────────────────────────────────────────────────
+const APPLICATION_SELECT = {
+  id: true, workerId: true, fullName: true, phone: true, skills: true, homeArea: true,
+  idType: true, idCardNumber: true, idDocumentUrl: true, photoUrl: true,
+  guarantorName: true, guarantorPhone: true, guarantorRelationship: true,
+  referenceName: true, referencePhone: true, referenceRelationship: true,
+  skillEvidenceUrls: true, experienceSummary: true, experienceEntries: true, certifications: true,
+  accountStatus: true, applicationNote: true, activatedAt: true, activatedBy: true, createdAt: true,
+};
+
+// GET /admin/applications?status=under_review|active|suspended|rejected|all
+router.get('/applications', adminAuth, async (req, res) => {
+  const status = req.query.status || 'under_review';
+  try {
+    const workers = await prisma.worker.findMany({
+      where: status === 'all' ? {} : { accountStatus: status },
+      select: APPLICATION_SELECT,
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json({ workers });
+  } catch (err) {
+    console.error('[admin] applications failed:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PATCH /admin/applications/:id — body { action: approve|reject|suspend|reactivate, note?, by? }
+// Reject and suspend need a reason; it's shown to the applicant.
+router.patch('/applications/:id', adminAuth, async (req, res) => {
+  const { action } = req.body;
+  const note = req.body.note ? String(req.body.note).trim().slice(0, 1000) : '';
+  const by = req.body.by ? String(req.body.by).trim().slice(0, 100) : 'BeyondX admin';
+  const next = { approve: 'active', reactivate: 'active', reject: 'rejected', suspend: 'suspended' }[action];
+  if (!next) return res.status(400).json({ error: 'action must be approve, reject, suspend or reactivate' });
+  if ((action === 'reject' || action === 'suspend') && !note) {
+    return res.status(400).json({ error: 'A reason is required.' });
+  }
+  try {
+    const worker = await prisma.worker.update({
+      where: { id: req.params.id },
+      data: {
+        accountStatus: next,
+        applicationNote: note || null,
+        ...(next === 'active' ? { activatedAt: new Date(), activatedBy: by } : {}),
+      },
+      select: APPLICATION_SELECT,
+    });
+    res.json({ worker });
+    if (worker.phone) {
+      const first = (worker.fullName || '').split(' ')[0] || 'there';
+      const msg = {
+        approve: `BeyondX: Hi ${first}, your application is approved. You are now a BeyondX Xpert. Log in to see available jobs: beyondxco.com`,
+        reactivate: `BeyondX: Hi ${first}, your BeyondX account is active again. Log in to see available jobs: beyondxco.com`,
+        reject: `BeyondX: Hi ${first}, we could not approve your application at this time. Log in to see the details.`,
+        suspend: `BeyondX: Hi ${first}, your BeyondX account has been suspended. Log in to see the details or contact support.`,
+      }[action];
+      sendSMS(worker.phone, msg);
+    }
+  } catch (err) {
+    if (err.code === 'P2025') return res.status(404).json({ error: 'Xpert not found.' });
+    console.error('[admin] application update failed:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── SITE REPORTS ───────────────────────────────────────────────────────────
+// GET /admin/site-reports?status=open|resolved|all
+router.get('/site-reports', adminAuth, async (req, res) => {
+  const status = req.query.status || 'open';
+  try {
+    const reports = await prisma.siteReport.findMany({
+      where: status === 'all' ? {} : { status },
+      include: {
+        worker: { select: { fullName: true, workerId: true, phone: true } },
+        task: { select: { taskType: true, location: true, employer: { select: { orgName: true, phone: true } } } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json({ reports });
+  } catch (err) {
+    console.error('[admin] site reports failed:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PATCH /admin/site-reports/:id — body { status: resolved|open, adminNote? }
+router.patch('/site-reports/:id', adminAuth, async (req, res) => {
+  const status = req.body.status === 'open' ? 'open' : 'resolved';
+  try {
+    const report = await prisma.siteReport.update({
+      where: { id: req.params.id },
+      data: {
+        status,
+        ...(req.body.adminNote ? { adminNote: String(req.body.adminNote).slice(0, 1000) } : {}),
+        resolvedAt: status === 'resolved' ? new Date() : null,
+      },
+    });
+    res.json({ report });
+  } catch (err) {
+    if (err.code === 'P2025') return res.status(404).json({ error: 'Report not found.' });
+    console.error('[admin] site report update failed:', err.message);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
