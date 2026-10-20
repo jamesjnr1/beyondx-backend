@@ -370,7 +370,9 @@ router.get('/', async (req, res) => {
       }
     } catch { /* unauthenticated is fine */ }
 
-    if (currentWorkerId && !(await isActiveWorker(currentWorkerId))) {
+    // Closed loop: open jobs are only for signed-in, active Xperts — never a
+    // public job board.
+    if (!currentWorkerId || !(await isActiveWorker(currentWorkerId))) {
       return res.json({ tasks: [] });
     }
     // Only jobs this Xpert is eligible for (matching skills). Xperts with no
