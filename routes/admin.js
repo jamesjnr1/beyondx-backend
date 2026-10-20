@@ -5,6 +5,7 @@ const { expireStaleOffers, notifyMatchingWorkers } = require('./tasks');
 const { calcProximity } = require('../utils/proximity');
 const { sendPushToAudience, sendPushToUser } = require('../lib/push');
 const prisma  = require('../lib/prisma');
+const { setXpertStatus, StatusError } = require('../lib/xpertStatus');
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'beyondx2026';
 
@@ -995,33 +996,63 @@ router.get('/invoices', adminAuth, async (req, res) => {
   }
 });
 
-// PATCH /admin/tasks/:id/invoice — body { amount, workerPay, note? }
+// PATCH /admin/tasks/:id/invoice — the quote composer.
+// Body { amount, workerPay, note?, benchmarkRate?, scopeAdjustment?, pricingType?, by? }.
+// One firm quote; the employer can only accept or decline. If the per-Xpert
+// pay is above the relevant Xpert price band ceiling it is held for sign-off
+// and not sent until approved.
 router.patch('/tasks/:id/invoice', adminAuth, async (req, res) => {
   const amount = parseFloat(req.body.amount);
   const workerPay = parseFloat(req.body.workerPay);
   const note = req.body.note ? String(req.body.note).trim().slice(0, 1000) : null;
+  const optNum = (v) => (v === '' || v == null || isNaN(parseFloat(v)) ? null : parseFloat(v));
   if (!(amount > 0)) return res.status(400).json({ error: 'Invoice amount must be greater than 0.' });
   if (!(workerPay > 0) || workerPay > amount) return res.status(400).json({ error: 'Xpert pay must be greater than 0 and no more than the invoice amount.' });
   try {
-    const existing = await prisma.task.findUnique({ where: { id: req.params.id }, select: { status: true } });
+    const existing = await prisma.task.findUnique({ where: { id: req.params.id }, select: { status: true, taskType: true, slotsNeeded: true, workerId: true, pricingType: true, signoffStatus: true } });
     if (!existing) return res.status(404).json({ error: 'Task not found.' });
     if (!['awaiting_invoice', 'invoice_sent'].includes(existing.status)) {
       return res.status(409).json({ error: 'This task is not awaiting an invoice.' });
     }
+    // Above-band check against the assigned Xpert's ceiling, or else the
+    // highest ceiling among active Xperts who do this work.
+    const perXpert = workerPay / Math.max(1, existing.slotsNeeded || 1);
+    let ceiling = null;
+    if (existing.workerId) {
+      const w = await prisma.worker.findUnique({ where: { id: existing.workerId }, select: { priceCeiling: true } });
+      ceiling = w?.priceCeiling ?? null;
+    } else {
+      const band = await require('./adminClosedLoop').bandFor(existing.taskType);
+      ceiling = band?.ceiling ?? null;
+    }
+    const aboveBand = ceiling != null && perXpert > ceiling;
+    const quoteFields = {
+      invoiceAmount: amount, pay: workerPay, invoiceNote: note,
+      benchmarkRate: optNum(req.body.benchmarkRate), scopeAdjustment: optNum(req.body.scopeAdjustment),
+      pricingType: ['fixed', 'hourly'].includes(req.body.pricingType) ? req.body.pricingType : existing.pricingType,
+      aboveBand,
+    };
+    if (aboveBand) {
+      const held = await prisma.task.update({
+        where: { id: req.params.id },
+        data: { ...quoteFields, status: 'awaiting_invoice', signoffStatus: 'pending', signedOffBy: null },
+      });
+      return res.json({ task: held, heldForSignoff: true, ceiling });
+    }
     const task = await prisma.task.update({
       where: { id: req.params.id },
-      data: { status: 'invoice_sent', invoiceAmount: amount, pay: workerPay, invoiceNote: note, invoiceSentAt: new Date() },
+      data: { ...quoteFields, status: 'invoice_sent', invoiceSentAt: new Date(), signoffStatus: 'not_needed', quoteResponse: 'pending' },
       include: { employer: { select: { phone: true, contactPerson: true } } },
     });
     res.json({ task });
     sendPushToUser({ employerId: task.employerId }, {
-      title: 'Your invoice is ready',
-      body: `"${task.taskType}" — GHS ${amount.toFixed(2)}. Review and pay in your dashboard.`,
+      title: 'Your quote is ready',
+      body: `"${task.taskType}" — GHS ${amount.toFixed(2)}. Accept or decline in your dashboard.`,
       url: '/',
     });
     if (task.employer?.phone) {
       const first = (task.employer.contactPerson || '').split(' ')[0] || 'there';
-      sendSMS(task.employer.phone, `BeyondX: Hi ${first}, your invoice for "${task.taskType}" is GHS ${amount.toFixed(2)}. Review and pay in your dashboard: beyondxco.com`);
+      sendSMS(task.employer.phone, `BeyondX: Hi ${first}, your quote for "${task.taskType}" is GHS ${amount.toFixed(2)}. Accept or decline in your dashboard: beyondxco.com`);
     }
   } catch (err) {
     console.error('[admin] invoice failed:', err.message);
@@ -1037,6 +1068,8 @@ const APPLICATION_SELECT = {
   referenceName: true, referencePhone: true, referenceRelationship: true,
   skillEvidenceUrls: true, experienceSummary: true, experienceEntries: true, certifications: true,
   accountStatus: true, applicationNote: true, activatedAt: true, activatedBy: true, createdAt: true,
+  xpertStatus: true, guarantorOutcome: true, guarantorExplainerSentAt: true, evidenceOutcome: true, evidenceTaskType: true,
+  referenceOutcome: true, referenceAttempts: true, certificationUrls: true, verificationSource: true,
 };
 
 // GET /admin/applications?status=under_review|active|suspended|rejected|all
@@ -1056,26 +1089,27 @@ router.get('/applications', adminAuth, async (req, res) => {
 });
 
 // PATCH /admin/applications/:id — body { action: approve|reject|suspend|reactivate, note?, by? }
-// Reject and suspend need a reason; it's shown to the applicant.
+// Goes through the Xpert status pipeline (lib/xpertStatus.js). Approve is
+// only possible once screening is complete. Reject, suspend and reactivate
+// need a reason; reject and suspend reasons are shown to the applicant.
 router.patch('/applications/:id', adminAuth, async (req, res) => {
   const { action } = req.body;
   const note = req.body.note ? String(req.body.note).trim().slice(0, 1000) : '';
   const by = req.body.by ? String(req.body.by).trim().slice(0, 100) : 'BeyondX admin';
-  const next = { approve: 'active', reactivate: 'active', reject: 'rejected', suspend: 'suspended' }[action];
+  const next = { approve: 'provisional_active', reactivate: 'full_active', reject: 'blocked_closed', suspend: 'suspended' }[action];
   if (!next) return res.status(400).json({ error: 'action must be approve, reject, suspend or reactivate' });
-  if ((action === 'reject' || action === 'suspend') && !note) {
-    return res.status(400).json({ error: 'A reason is required.' });
-  }
+  if (action !== 'approve' && !note) return res.status(400).json({ error: 'A reason is required.' });
   try {
-    const worker = await prisma.worker.update({
-      where: { id: req.params.id },
-      data: {
-        accountStatus: next,
-        applicationNote: note || null,
-        ...(next === 'active' ? { activatedAt: new Date(), activatedBy: by } : {}),
-      },
-      select: APPLICATION_SELECT,
+    const current = await prisma.worker.findUnique({ where: { id: req.params.id }, select: { guarantorOutcome: true, evidenceOutcome: true, referenceOutcome: true } });
+    if (!current) return res.status(404).json({ error: 'Xpert not found.' });
+    if (action === 'approve' && !(current.guarantorOutcome === 'yes' && current.evidenceOutcome === 'pass' && current.referenceOutcome === 'confirmed')) {
+      return res.status(409).json({ error: 'Screening is not complete. Confirm the guarantor, pass the work evidence and confirm the reference first.' });
+    }
+    await setXpertStatus(req.params.id, next, {
+      by, reason: note || 'Screening complete; approved',
+      note: action === 'reject' || action === 'suspend' ? note : '',
     });
+    const worker = await prisma.worker.findUnique({ where: { id: req.params.id }, select: APPLICATION_SELECT });
     res.json({ worker });
     if (worker.phone) {
       const first = (worker.fullName || '').split(' ')[0] || 'there';
@@ -1088,6 +1122,7 @@ router.patch('/applications/:id', adminAuth, async (req, res) => {
       sendSMS(worker.phone, msg);
     }
   } catch (err) {
+    if (err instanceof StatusError) return res.status(400).json({ error: err.message });
     if (err.code === 'P2025') return res.status(404).json({ error: 'Xpert not found.' });
     console.error('[admin] application update failed:', err.message);
     res.status(500).json({ error: 'Server error' });

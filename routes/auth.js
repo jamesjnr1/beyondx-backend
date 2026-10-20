@@ -4,6 +4,7 @@ const jwt     = require('jsonwebtoken');
 const { Resend } = require('resend');
 const { sendSMS } = require('../utils/sms');
 const prisma  = require('../lib/prisma');
+const { setXpertStatus } = require('../lib/xpertStatus');
 
 const router  = express.Router();
 
@@ -56,6 +57,21 @@ async function sendWelcomeEmail(email, orgName, contactPerson) {
   } catch (err) {
     console.error('Welcome email failed:', err);
   }
+}
+
+// Sent automatically when an applicant names a guarantor. The guarantor is a
+// character reference and trust signal only: the message says plainly that
+// they take on no legal or financial responsibility.
+async function sendGuarantorExplainer(worker) {
+  if (!worker.guarantorPhone) return;
+  const applicant = (worker.fullName || 'An applicant').split(' ')[0];
+  const first = (worker.guarantorName || '').split(' ')[0] || 'there';
+  await sendSMS(worker.guarantorPhone,
+    `BeyondX: Hi ${first}, ${applicant} named you as their guarantor to work through BeyondX. ` +
+    `This is a character reference only - you are not responsible for any money or legal matters. ` +
+    `A BeyondX team member will call you to confirm.`);
+  await prisma.worker.update({ where: { id: worker.id }, data: { guarantorExplainerSentAt: new Date() } });
+  await setXpertStatus(worker.id, 'guarantor_pending', { by: 'system', reason: 'Guarantor explainer message sent' });
 }
 
 async function sendWelcomeSMS(phone, fullName) {
@@ -473,6 +489,7 @@ router.post('/worker-register', async (req, res) => {
     fullName, phone, prisonFacility, skills, pin, guarantorName, guarantorPhone, guarantorRelationship, visitorId, homeArea,
     idType, idCardNumber, idDocumentUrl, experienceSummary,
     referenceName, referencePhone, referenceRelationship, skillEvidenceUrls,
+    evidenceTaskType, certificationUrls,
   } = req.body;
 
   if (!fullName || !pin) {
@@ -509,7 +526,9 @@ router.post('/worker-register', async (req, res) => {
   if (/family|relative|brother|sister|mother|father|parent|spouse|wife|husband|cousin|uncle|aunt/i.test(referenceRelationship)) {
     return res.status(400).json({ error: 'Your reference cannot be a family member. Choose a past employer or someone in your trade.' });
   }
-  if (evidence.length === 0) return res.status(400).json({ error: 'Upload at least one photo of your previous work.' });
+  if (evidence.length === 0) return res.status(400).json({ error: 'Upload at least one photo or video of your previous work.' });
+  const certs = Array.isArray(certificationUrls) ? certificationUrls.filter(isHttps).slice(0, 5) : [];
+  const evidenceType = evidenceTaskType && skills.includes(evidenceTaskType) ? evidenceTaskType : skills[0];
 
   try {
     const pinHash = await bcrypt.hash(pin, 10);
@@ -562,7 +581,11 @@ router.post('/worker-register', async (req, res) => {
             referencePhone,
             referenceRelationship: String(referenceRelationship).trim().slice(0, 100),
             skillEvidenceUrls: evidence,
+            evidenceTaskType: String(evidenceType).slice(0, 100),
+            evidenceOutcome: 'pending',
+            certificationUrls: certs,
             accountStatus: 'under_review',
+            xpertStatus: 'applied',
           }
         });
         break; // success
@@ -600,6 +623,7 @@ router.post('/worker-register', async (req, res) => {
 });
 
 sendWelcomeSMS(worker.phone, worker.fullName);
+sendGuarantorExplainer(worker).catch((err) => console.error('[guarantor explainer]', err.message));
 markVisitorConverted(visitorId, 'worker');
 
   } catch (err) {

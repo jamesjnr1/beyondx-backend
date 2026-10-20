@@ -50,50 +50,10 @@ const REQUEST_SELECT = {
   coordinator: { select: { fullName: true, phone: true, workerId: true } },
 };
 
-// POST /api/coordinator-requests — employer sends a job to a coordinator
-router.post('/', authEmployer, async (req, res) => {
-  const { coordinatorWorkerId, taskType, description, location, duration, workersNeeded, materialsProvided, scheduledDate, scheduledTime } = req.body;
-  if (!coordinatorWorkerId || !taskType || !location) {
-    return res.status(400).json({ error: 'coordinatorWorkerId, taskType and location are required' });
-  }
-  try {
-    const coordinator = await prisma.worker.findUnique({
-      where: { workerId: coordinatorWorkerId },
-      select: { id: true, role: true, fullName: true, phone: true },
-    });
-    if (!coordinator) return res.status(404).json({ error: 'Coordinator not found' });
-    if (coordinator.role !== 'coordinator') return res.status(400).json({ error: 'That worker is not an approved Coordinator.' });
-
-    const request = await prisma.coordinatorJobRequest.create({
-      data: {
-        employerId: req.employerId,
-        coordinatorId: coordinator.id,
-        taskType,
-        description: description || null,
-        location,
-        duration: duration || '1 day',
-        workersNeeded: workersNeeded ? Math.max(1, parseInt(workersNeeded, 10)) : 1,
-        materialsProvided: Boolean(materialsProvided),
-        scheduledDate: scheduledDate || null,
-        scheduledTime: scheduledTime || null,
-      },
-      select: REQUEST_SELECT,
-    });
-
-    res.status(201).json({ request });
-
-    sendPushToUser({ workerId: coordinator.id }, {
-      title: 'New job request',
-      body: `${taskType} in ${location}. Review and submit your price in your Coordinator Dashboard.`,
-      url: '/',
-    });
-    if (coordinator.phone) {
-      sendSMS(coordinator.phone, `BeyondX: New job request — ${taskType} in ${location}. Review and submit your price in your Coordinator Dashboard.`).catch(() => null);
-    }
-  } catch (err) {
-    console.error('Create coordinator request error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
+// POST /api/coordinator-requests — retired: employers no longer choose a coordinator. Existing requests can
+// still be quoted and finished below.
+router.post('/', authEmployer, (req, res) => {
+  res.status(410).json({ error: 'Employers can no longer choose a coordinator. Request an Xpert and BeyondX will assign the right team.' });
 });
 
 // GET /api/coordinator-requests/mine — employer's own requests, newest first
@@ -104,7 +64,7 @@ router.get('/mine', authEmployer, async (req, res) => {
       select: REQUEST_SELECT,
       orderBy: { createdAt: 'desc' },
     });
-    res.json({ requests });
+    res.json({ requests: requests.map(r => ({ ...r, coordinator: r.coordinator ? { fullName: r.coordinator.fullName, workerId: r.coordinator.workerId } : null })) });
   } catch (err) {
     console.error('List coordinator requests (employer) error:', err);
     res.status(500).json({ error: 'Server error' });

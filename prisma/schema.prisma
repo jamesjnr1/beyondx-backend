@@ -78,6 +78,35 @@ model Worker {
   applicationNote        String?   // staff note shown to the applicant on rejection/suspension
   activatedAt            DateTime?
   activatedBy            String?
+  // Detailed screening pipeline (admin only — Xperts only ever see the plain
+  // accountStatus). applied → guarantor_pending → guarantor_confirmed →
+  // skill_verification → provisional_active → full_active, plus
+  // under_review | suspended | inactive | removed | blocked_closed.
+  // Every change is written to XpertStatusHistory.
+  xpertStatus            String    @default("full_active")
+  verificationSource     String    @default("direct_beyondx") // direct_beyondx | coordinator
+  // Guarantor: explainer SMS on sign-up, then a confirmation callback.
+  // Internal trust signal only — no legal or financial liability.
+  guarantorExplainerSentAt DateTime?
+  guarantorCallbackAt      DateTime?
+  guarantorOutcome         String?   // yes | no | no_response
+  // Skill evidence review — pass or fail, no partial score.
+  evidenceTaskType       String?
+  evidenceOutcome        String?   // pending | pass | fail
+  evidenceReviewedBy     String?
+  evidenceReviewedAt     DateTime?
+  certificationUrls      String[]  @default([])
+  // Reference call.
+  referenceOutcome       String?   // confirmed | inconclusive | unreachable
+  referenceAttempts      Int       @default(0)
+  referenceCalledBy      String?
+  referenceCalledAt      DateTime?
+  // Personal price band (what this Xpert is paid per job). History in PriceBandHistory.
+  priceFloor             Float?
+  priceCeiling           Float?
+  priceBandAdjustedAt    DateTime?
+  priceBandAdjustedBy    String?
+  priceBandReason        String?
   createdAt      DateTime     @default(now())
   dispatches     Dispatch[]
   ussdSessions   UssdSession[]
@@ -218,6 +247,29 @@ model Task {
   invoiceSentAt  DateTime?
   durationHours  Float?
   premium        Boolean   @default(false) // job starts within 48 hours of posting
+  // Request details the employer fills in (Request an Xpert flow).
+  photoUrls           String[]  @default([])
+  requiredSkills      String?
+  specialRequirements String?
+  equipmentNotes      String?
+  siteNotes           String?
+  recurrence          String    @default("one_time") // one_time | recurring
+  schedulePattern     String?   // every_monday | every_weekday | every_saturday | custom:<text>
+  recurringServiceId  String?
+  pricingType         String    @default("fixed")    // fixed | hourly (see lib/closedLoopConfig.js)
+  // Quote (the invoice BeyondX sends). Above-band quotes wait for sign-off.
+  benchmarkRate       Float?
+  scopeAdjustment     Float?
+  aboveBand           Boolean   @default(false)
+  signoffStatus       String    @default("not_needed") // not_needed | pending | approved | rejected
+  signedOffBy         String?
+  quoteResponse       String?   // pending | accepted | declined
+  quoteRespondedAt    DateTime?
+  // Dispatch and live monitoring.
+  backupWorkerId      String?
+  arrivedAt           DateTime?
+  startedAt           DateTime?
+  replacementInProgress Boolean @default(false)
 
   scope          TaskScope?
   siteReports    SiteReport[]
@@ -239,6 +291,18 @@ model Review {
   // Employer-on-Xpert reviews also score skills and professionalism.
   skillsRating          Int?
   professionalismRating Int?
+  // Employer → Xpert structured feedback.
+  attendanceRating      Int?
+  qualityRating         Int?
+  taskCompletionRating  Int?
+  priceFairness         String?  // fair | too_high | too_low
+  // Xpert → employer structured feedback.
+  taskAccuracyRating      Int?
+  employerBehaviorRating  Int?
+  paymentRating           Int?
+  workingConditionsRating Int?
+  scopeChangesRating      Int?
+  communicationRating     Int?
   comment     String?
   worker      Worker?      @relation("ReviewsOfWorker", fields: [workerId], references: [id])
   workerId    String?
@@ -509,4 +573,119 @@ model SiteReport {
 
   @@index([status])
   @@index([taskId])
+}
+
+// ── CLOSED LOOP ────────────────────────────────────────────────────────────
+// Plain id columns (no Prisma relations) so these stay additive and never
+// block deleting or editing the older tables.
+
+model XpertStatusHistory {
+  id         String   @id @default(uuid())
+  workerId   String
+  oldStatus  String?
+  newStatus  String
+  changedBy  String
+  reason     String?
+  createdAt  DateTime @default(now())
+
+  @@index([workerId])
+}
+
+model PriceBandHistory {
+  id         String   @id @default(uuid())
+  workerId   String
+  floor      Float?
+  ceiling    Float?
+  reason     String
+  adjustedBy String
+  createdAt  DateTime @default(now())
+
+  @@index([workerId])
+}
+
+// What other providers charge for a task type — the starting point for quotes.
+model BenchmarkRate {
+  id        String   @id @default(uuid())
+  taskType  String   @unique
+  rate      Float
+  unit      String   @default("job") // job | hour | day
+  notes     String?
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+}
+
+// A scope change on site. Amounts only change once both sides confirm.
+model ChangeOrder {
+  id                  String    @id @default(uuid())
+  taskId              String
+  reason              String
+  adjustmentRule      String
+  originalAmount      Float
+  newAmount           Float
+  originalPay         Float?
+  newPay              Float?
+  employerConfirmedAt DateTime?
+  xpertConfirmedAt    DateTime?
+  confirmationChannel String    @default("whatsapp")
+  loggedBy            String
+  appliedAt           DateTime?
+  createdAt           DateTime  @default(now())
+
+  @@index([taskId])
+}
+
+// Who BeyondX put on a job, as primary or backup, and what happened.
+model Assignment {
+  id                     String    @id @default(uuid())
+  taskId                 String
+  workerId               String
+  role                   String    // primary | backup
+  status                 String    @default("active") // active | replaced | released
+  confirmedAt            DateTime?
+  arrivedAt              DateTime?
+  completedAt            DateTime?
+  replacedByAssignmentId String?
+  assignedBy             String?
+  createdAt              DateTime  @default(now())
+
+  @@index([taskId])
+  @@index([workerId])
+}
+
+// Work an employer needs regularly. The preferred team is set by BeyondX only.
+model RecurringService {
+  id                String   @id @default(uuid())
+  employerId        String
+  sourceTaskId      String?
+  taskType          String
+  location          String
+  template          String   // JSON copy of the original request
+  schedulePattern   String
+  preferredXpertIds String[] @default([])
+  nextServiceDate   String?
+  active            Boolean  @default(true)
+  createdAt         DateTime @default(now())
+
+  @@index([employerId])
+}
+
+// A named incident raised by either side. A low rating alone never creates one.
+model Flag {
+  id                  String    @id @default(uuid())
+  taskId              String?
+  raisedByType        String    // employer | xpert
+  raisedById          String
+  againstType         String    // employer | xpert
+  againstId           String?
+  category            String
+  incidentDescription String
+  incidentDate        String
+  status              String    @default("open") // open | under_review | resolved
+  decision            String?   // clear | suspend | remove
+  resolvedBy          String?
+  resolutionNotes     String?
+  createdAt           DateTime  @default(now())
+  resolvedAt          DateTime?
+
+  @@index([status])
 }
