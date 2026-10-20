@@ -16,10 +16,12 @@ async function logSms(phone, message, status, errorType, errorDetail) {
   }
 }
 
-// Arkesel credentials — hardcoded for reliability.
-// Confirmed working: payment SMS to 233553608309 went through with this key.
-const ARKESEL_API_KEY = process.env.ARKESEL_API_KEY || 'amNuVVVDUnJ3T0t0TkxrVlZjenI';
-const ARKESEL_SENDER  = 'BeyondX';
+// Arkesel credentials come only from the environment (Railway → Variables).
+// Never put the key in code: anyone who can read the repository could spend
+// the SMS balance with it.
+const ARKESEL_API_KEY = process.env.ARKESEL_API_KEY || '';
+const ARKESEL_SENDER  = process.env.ARKESEL_SENDER || 'BeyondX';
+if (!ARKESEL_API_KEY) console.error('[sms] ARKESEL_API_KEY is not set — SMS will not be sent until it is added in Railway.');
 
 async function sendSMS(phone, message) {
   if (!phone) {
@@ -40,7 +42,12 @@ async function sendSMS(phone, message) {
     return;
   }
 
-  console.log(`[sms] sending to ${recipient} via BeyondX | key: ${ARKESEL_API_KEY.slice(0,6)}...`);
+  if (!ARKESEL_API_KEY) {
+    await logSms(phone, message, 'failed', 'not_configured', 'ARKESEL_API_KEY is not set on the server');
+    return;
+  }
+
+  console.log(`[sms] sending to ${recipient} via ${ARKESEL_SENDER}`);
 
   try {
     const resp = await fetch('https://sms.arkesel.com/api/v2/sms/send', {
