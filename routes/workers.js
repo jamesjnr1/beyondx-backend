@@ -22,85 +22,11 @@ const VALID_SKILLS = [
   'Community Services'
 ];
 
-// GET /api/workers — get all active workers. Busy workers (currently on a
-// job) are still shown, marked via isBusy, rather than hidden entirely —
-// employers should be able to see the full pool and when someone frees up.
-router.get('/', async (req, res) => {
-  try {
-    const { jobLocation } = req.query; // optional: ?jobLocation=Tema
-    const workers = await prisma.worker.findMany({
-      where: { isActive: true, accountStatus: 'active' },
-      select: {
-        id:             true,
-        workerId:       true,
-        fullName:       true,
-        phone:          true,
-        skills:         true,
-        bio:            true,
-        dailyCharge:    true,
-        rating:         true,
-        tasksCompleted: true,
-        offenseLevel:   true,
-        gpsVerified:    true,
-        prisonFacility: true,
-        photoUrl:       true,
-        homeArea:       true,
-        hasTools:       true,
-        certifications: true,
-        priority:       true,
-        featuredTestimonial:       true,
-        featuredTestimonialSource: true,
-        tasks: {
-          where: { status: { in: ['offered', 'accepted', 'pending_confirmation'] } },
-          select: { id: true }
-        },
-        role:           true,
-        coordinatorApplication: true,
-        reviewsReceived: {
-          where: { fromRole: 'employer' },
-          select: {
-            rating: true, comment: true, createdAt: true,
-            task: { select: { taskType: true, employer: { select: { orgName: true } } } }
-          },
-          orderBy: { createdAt: 'desc' }
-        }
-      }
-    });
-    const flattened = workers.map(w => {
-      const proximity = jobLocation
-        ? calcProximity(w.homeArea, jobLocation)
-        : { available: false };
-      return {
-        ...w,
-        isBusy: (w.tasks || []).length > 0,
-        tasks: undefined,
-        proximity,
-        reviewsReceived: (w.reviewsReceived || []).map(r => ({
-          rating: r.rating,
-          comment: r.comment,
-          createdAt: r.createdAt,
-          taskType: r.task?.taskType || null,
-          reviewerName: r.task?.employer?.orgName || 'A BeyondX Employer'
-        }))
-      };
-    });
-    // Priority workers always sort first — a manual staff placement boost,
-    // ahead of proximity/rating either way. Within that, when jobLocation is
-    // provided: nearby workers first, then by rating; otherwise by rating.
-    flattened.sort((a, b) => {
-      if (a.priority !== b.priority) return a.priority ? -1 : 1;
-      if (jobLocation) {
-        const da = a.proximity?.roadKm ?? 9999;
-        const db = b.proximity?.roadKm ?? 9999;
-        if (da !== db) return da - db;
-      }
-      return (Number(b.rating) || 0) - (Number(a.rating) || 0);
-    });
-    res.json({ workers: flattened });
-  } catch (err) {
-    console.error('Fetch workers error:', err);
-    res.status(500).json({ error: 'Could not fetch workers' });
-  }
+// GET /api/workers — retired. In the closed-loop model BeyondX selects the
+// Xpert, so there is no list of Xperts for employers or the public. The
+// Xpert records themselves are kept; staff see them via /admin/workers.
+router.get('/', (req, res) => {
+  res.status(410).json({ error: 'Xpert listings are no longer available. Request an Xpert and BeyondX will assign one.' });
 });
 
 // GET /api/workers/me — the logged-in worker's own full profile
@@ -119,16 +45,38 @@ router.get('/me', authWorker, async (req, res) => {
         coordinatorDisputes: true, coordinatorQuotes: true, coordinatorPayoutSplits: true,
         accountStatus: true, applicationNote: true, idType: true, idDocumentUrl: true,
         referenceName: true, referencePhone: true, referenceRelationship: true,
-        skillEvidenceUrls: true, experienceSummary: true,
+        skillEvidenceUrls: true, experienceSummary: true, activatedAt: true, idVerified: true,
+        guarantorOutcome: true, evidenceOutcome: true, referenceOutcome: true, certificationUrls: true,
         reviewsReceived: {
           where: { fromRole: 'employer' },
-          select: { rating: true, skillsRating: true, professionalismRating: true, comment: true, createdAt: true },
+          select: { rating: true, skillsRating: true, professionalismRating: true, createdAt: true },
           orderBy: { createdAt: 'desc' }
         }
       }
     });
     if (!worker) return res.status(404).json({ error: 'Worker not found' });
-    res.json({ worker });
+    // Plain-language verification steps. Xperts never see internal status names.
+    const step = (outcome, map) => map[outcome] || map.default;
+    const { guarantorOutcome, evidenceOutcome, referenceOutcome, ...rest } = worker;
+    const verificationSteps = [
+      { key: 'id', label: 'ID check', state: worker.idVerified ? 'done' : worker.idDocumentUrl ? 'in_progress' : 'needed',
+        detail: worker.idVerified ? 'Verified' : worker.idDocumentUrl ? 'We are checking your ID' : 'Upload a photo of your ID' },
+      { key: 'guarantor', label: 'Guarantor', ...step(guarantorOutcome, {
+        yes: { state: 'done', detail: 'Confirmed' },
+        no: { state: 'needed', detail: 'Your guarantor did not confirm. Contact BeyondX.' },
+        no_response: { state: 'needed', detail: 'We could not reach your guarantor. Ask them to expect our call.' },
+        default: { state: 'in_progress', detail: 'We will call your guarantor to confirm' } }) },
+      { key: 'evidence', label: 'Work evidence', ...step(evidenceOutcome, {
+        pass: { state: 'done', detail: 'Approved' },
+        fail: { state: 'needed', detail: 'Not approved. Contact BeyondX to send new evidence.' },
+        default: worker.skillEvidenceUrls?.length ? { state: 'in_progress', detail: 'We are reviewing your work photos' } : { state: 'needed', detail: 'Add photos or a video of your work' } }) },
+      { key: 'reference', label: 'Reference', ...step(referenceOutcome, {
+        confirmed: { state: 'done', detail: 'Confirmed' },
+        unreachable: { state: 'needed', detail: 'We could not reach your reference. Contact BeyondX.' },
+        inconclusive: { state: 'in_progress', detail: 'We are following up with your reference' },
+        default: { state: 'in_progress', detail: 'We will call your reference' } }) },
+    ];
+    res.json({ worker: { ...rest, verificationSteps } });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }

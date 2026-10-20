@@ -5,6 +5,44 @@ const { sendSMS } = require('../utils/sms');
 const { calcProximity } = require('../utils/proximity');
 const { sendPushToUser } = require('../lib/push');
 const prisma  = require('../lib/prisma');
+const { defaultPricingType } = require('../lib/closedLoopConfig');
+
+const isHttps = (u) => typeof u === 'string' && u.startsWith('https://');
+const clean = (v, max = 2000) => (v == null || String(v).trim() === '' ? null : String(v).trim().slice(0, max));
+const SCHEDULE_PATTERNS = ['every_monday', 'every_weekday', 'every_saturday'];
+
+// What an employer may see about the Xpert on their job: name, skills,
+// experience, verification and relevant past work. Never contact details,
+// full history or other Xperts.
+const XPERT_FOR_EMPLOYER = {
+  fullName: true, workerId: true, rating: true, skills: true, experienceSummary: true,
+  idVerified: true, accountStatus: true, tasksCompleted: true,
+};
+
+// Each side sees the other's overall, skills and professionalism scores.
+// The rest of the structured feedback is private to BeyondX.
+const VISIBLE_REVIEW = { select: { fromRole: true, rating: true, skillsRating: true, professionalismRating: true, createdAt: true } };
+
+async function withRelevantWork(task) {
+  if (!task.acceptedBy || !task.workerId) return task;
+  const relevantJobs = await prisma.task.count({
+    where: { workerId: task.workerId, taskType: task.taskType, status: 'completed' },
+  });
+  const { accountStatus, ...xpert } = task.acceptedBy;
+  return { ...task, acceptedBy: { ...xpert, verified: accountStatus === 'active', relevantJobs } };
+}
+
+// Record an assignment event for live monitoring (admin dashboard).
+async function touchAssignment(taskId, workerId, data, role = 'primary') {
+  try {
+    const existing = await prisma.assignment.findFirst({ where: { taskId, workerId, status: 'active' } });
+    if (existing) return prisma.assignment.update({ where: { id: existing.id }, data });
+    return prisma.assignment.create({ data: { taskId, workerId, role, ...data } });
+  } catch (err) {
+    console.error('[assignment]', err.message);
+  }
+}
+router.touchAssignment = touchAssignment;
 
 // Maps the full category title (as sent by the frontend) to the skill string
 // workers register under. Both sides use the same title strings from data.ts.
@@ -142,62 +180,47 @@ function authEitherParty(req, res, next) {
   } catch { res.status(401).json({ error: 'Invalid token' }); }
 }
 
-// POST /api/tasks — employer posts a task.
-// If workerId is included (the employer picked a specific worker and paid
-// for them via the dispatch flow), the task is assigned directly to that
-// worker instead of being left open, and the worker gets a confirmation SMS.
+// POST /api/tasks — employer submits a Request an Xpert request. It waits
+// for BeyondX to review and quote it; employers never pick the Xpert.
 router.post('/', authEmployer, async (req, res) => {
-  const { taskType, description, location, duration, pay, workerId, paymentRef, workersNeeded, scheduledDate, scheduledTime, transportAllowance: frontendTransport, durationHours, premium } = req.body;
+  const { taskType, description, location, duration, workerId, workersNeeded, scheduledDate, scheduledTime, durationHours, premium } = req.body;
   if (!taskType || !location) return res.status(400).json({ error: 'taskType and location are required' });
-  // A direct dispatch carries its price; a posted request is priced later by
-  // BeyondX via an invoice, so it has no pay yet.
-  if (workerId && !pay) return res.status(400).json({ error: 'pay is required when dispatching a specific worker' });
+  // Closed loop: BeyondX selects the Xpert. Employers can only request work.
+  if (workerId) return res.status(400).json({ error: 'Employers cannot choose an Xpert. Submit a request and BeyondX will assign the right Xpert.' });
+  const recurrence = req.body.recurrence === 'recurring' ? 'recurring' : 'one_time';
+  let schedulePattern = null;
+  if (recurrence === 'recurring') {
+    const sp = String(req.body.schedulePattern || '');
+    schedulePattern = SCHEDULE_PATTERNS.includes(sp) ? sp
+      : sp.startsWith('custom:') && sp.length > 8 ? sp.slice(0, 200) : null;
+    if (!schedulePattern) return res.status(400).json({ error: 'Choose how often you need this done.' });
+  }
+  // Posted requests are priced later by BeyondX via a quote (invoice).
   try {
-    if (workerId) {
-      const activeTask = await prisma.task.findFirst({
-        where: { workerId, status: { in: ['offered', 'accepted', 'pending_confirmation'] } }
-      });
-      if (activeTask) {
-        return res.status(409).json({ error: activeTask.status === 'offered' ? 'This worker already has a pending offer awaiting their response.' : 'This worker is already on a job and is not available to dispatch right now.' });
-      }
-    }
-
     const data = {
       employerId: req.employerId,
       taskType,
       description: description || '',
       location,
       duration: duration || '1 day',
-      pay: parseFloat(pay) || 0,
+      pay: 0, // set by BeyondX when the quote is sent
       ...(durationHours ? { durationHours: parseFloat(durationHours) } : {}),
       premium: !!premium,
       ...(workersNeeded && workersNeeded > 1 ? { slotsNeeded: parseInt(workersNeeded, 10) } : {}),
-      ...(paymentRef ? { paymentRef } : {}),
       ...(scheduledDate ? { scheduledDate } : {}),
       ...(scheduledTime ? { scheduledTime } : {}),
+      photoUrls: Array.isArray(req.body.photoUrls) ? req.body.photoUrls.filter(isHttps).slice(0, 10) : [],
+      requiredSkills: clean(req.body.requiredSkills, 500),
+      specialRequirements: clean(req.body.specialRequirements),
+      equipmentNotes: clean(req.body.equipmentNotes),
+      siteNotes: clean(req.body.siteNotes),
+      recurrence,
+      schedulePattern,
+      pricingType: defaultPricingType(recurrence),
     };
-    if (workerId) {
-      data.workerId = workerId;
-      // Compute transport allowance from worker's home area to job location
-      const workerForProx = await prisma.worker.findUnique({
-        where: { id: workerId },
-        select: { homeArea: true },
-      });
-      if (frontendTransport !== undefined && frontendTransport > 0) {
-        // Frontend already calculated it via /api/workers/proximity — use it directly
-        data.transportAllowance = parseInt(frontendTransport, 10);
-      } else if (workerForProx?.homeArea && location) {
-        const prox = calcProximity(workerForProx.homeArea, location);
-        if (prox.available) data.transportAllowance = prox.transportAllowance;
-      }
-      // If the employer submitted payment details, hold as payment_pending until
-      // BeyondX manually verifies the payment before notifying the worker.
-      data.status = req.body.status === 'payment_pending' ? 'payment_pending' : 'offered';
-    } else {
-      // Posted request: held for BeyondX to review and invoice. Xperts are
-      // only notified once the employer has paid the invoice.
-      data.status = 'awaiting_invoice';
-    }
+    // Held for BeyondX to review and quote. Xperts are only notified once
+    // the employer has accepted and paid.
+    data.status = 'awaiting_invoice';
 
     const task = await prisma.task.create({
       data,
@@ -207,22 +230,21 @@ router.post('/', authEmployer, async (req, res) => {
       }
     });
 
-    if (workerId && task.acceptedBy && task.status !== 'payment_pending') {
-      // Only notify the worker once payment has been verified by BeyondX.
-      // When status is payment_pending, the admin console sends the SMS
-      // after manually confirming the payment via Verify Payments.
-      const firstName = (task.acceptedBy.fullName || '').split(' ')[0] || 'there';
-      const workerPay = Math.round(parseFloat(task.pay));
-      const prox2 = data.workerId && data.transportAllowance >= 80
-        ? { isIntercity: true } : { isIntercity: false };
-      const intercityTag = prox2.isIntercity ? ' [LONG DISTANCE]' : '';
-      const message = `BeyondX: Hi ${firstName}, you have a job offer in ${location} paying GHS ${workerPay}${intercityTag}. Open your dashboard to accept or decline.`;
-      sendSMS(task.acceptedBy.phone, message);
-      sendPushToUser({ workerId: task.workerId }, {
-        title: 'New job offer',
-        body: `${taskType} in ${location} — GHS ${workerPay}${intercityTag}`,
-        url: '/',
+    if (recurrence === 'recurring') {
+      const service = await prisma.recurringService.create({
+        data: {
+          employerId: req.employerId, sourceTaskId: task.id, taskType, location,
+          schedulePattern, nextServiceDate: scheduledDate || null,
+          template: JSON.stringify({
+            description: data.description, duration: data.duration, durationHours: data.durationHours || null,
+            workersNeeded: workersNeeded || 1, scheduledTime: scheduledTime || null,
+            requiredSkills: data.requiredSkills, specialRequirements: data.specialRequirements,
+            equipmentNotes: data.equipmentNotes, siteNotes: data.siteNotes, photoUrls: data.photoUrls,
+          }),
+        },
       });
+      await prisma.task.update({ where: { id: task.id }, data: { recurringServiceId: service.id } });
+      task.recurringServiceId = service.id;
     }
 
     res.status(201).json({ task });
@@ -291,7 +313,7 @@ router.patch('/:id/pay-invoice', authEmployer, async (req, res) => {
     const task = await prisma.task.findUnique({ where: { id: req.params.id }, select: { id: true, employerId: true, status: true } });
     if (!task || task.employerId !== req.employerId) return res.status(404).json({ error: 'Task not found.' });
     if (task.status !== 'invoice_sent') return res.status(409).json({ error: 'This job has no invoice awaiting payment.' });
-    const updated = await prisma.task.update({ where: { id: task.id }, data: { status: 'payment_pending', paymentRef } });
+    const updated = await prisma.task.update({ where: { id: task.id }, data: { status: 'payment_pending', paymentRef, quoteResponse: 'accepted', quoteRespondedAt: new Date() } });
     res.json({ task: updated });
   } catch (err) {
     console.error('[tasks] pay-invoice failed:', err.message);
@@ -306,7 +328,7 @@ router.patch('/:id/decline-invoice', authEmployer, async (req, res) => {
     const task = await prisma.task.findUnique({ where: { id: req.params.id }, select: { id: true, employerId: true, status: true } });
     if (!task || task.employerId !== req.employerId) return res.status(404).json({ error: 'Task not found.' });
     if (task.status !== 'invoice_sent') return res.status(409).json({ error: 'This job has no invoice to decline.' });
-    const updated = await prisma.task.update({ where: { id: task.id }, data: { status: 'cancelled', adminNote: 'Invoice declined by employer' } });
+    const updated = await prisma.task.update({ where: { id: task.id }, data: { status: 'cancelled', adminNote: 'Invoice declined by employer', quoteResponse: 'declined', quoteRespondedAt: new Date() } });
     res.json({ task: updated });
   } catch (err) {
     console.error('[tasks] decline-invoice failed:', err.message);
@@ -351,6 +373,13 @@ router.get('/', async (req, res) => {
     if (currentWorkerId && !(await isActiveWorker(currentWorkerId))) {
       return res.json({ tasks: [] });
     }
+    // Only jobs this Xpert is eligible for (matching skills). Xperts with no
+    // skills on file still see everything rather than nothing.
+    let eligibleTypes = null;
+    if (currentWorkerId) {
+      const me = await prisma.worker.findUnique({ where: { id: currentWorkerId }, select: { skills: true } });
+      if (me?.skills?.length) eligibleTypes = me.skills.map(s => s.toLowerCase());
+    }
 
     const tasks = await prisma.task.findMany({
       where: {
@@ -363,10 +392,14 @@ router.get('/', async (req, res) => {
           OR: [{ workerId: null }, { workerId: { not: currentWorkerId } }],
         } : {}),
       },
-      include: { employer: { select: { orgName: true, contactPerson: true, phone: true, address: true } } },
+      // Employer and site details are revealed once the Xpert accepts (/mine).
+      include: { employer: { select: { orgName: true, rating: true } } },
       orderBy: { createdAt: 'desc' }
     });
-    const withSlots = tasks.map(t => ({
+    const eligible = eligibleTypes
+      ? tasks.filter(t => eligibleTypes.includes(String(categoryForTaskType(t.taskType) || t.taskType).toLowerCase()))
+      : tasks;
+    const withSlots = eligible.map(({ siteNotes, paymentRef, invoiceAmount, invoiceNote, adminNote, ...t }) => ({
       ...t,
       slotsNeeded: t.slotsNeeded || 1,
       filledSlots: t.filledSlots || 0,
@@ -389,20 +422,22 @@ router.get('/all', authEmployer, async (req, res) => {
         groupId: null,  // exclude personal worker rows (they have groupId = parent task id)
       },
       include: {
-        acceptedBy: { select: { fullName: true, workerId: true, phone: true, rating: true } },
-        reviews: true,
+        acceptedBy: { select: XPERT_FOR_EMPLOYER },
+        reviews: VISIBLE_REVIEW,
       },
       orderBy: { createdAt: 'desc' }
     });
 
     // For multi-slot tasks, attach the list of workers who've accepted
-    const withWorkers = await Promise.all(tasks.map(async (t) => {
+    const withWorkers = await Promise.all(tasks.map(async (t0) => {
+      const { backupWorkerId, adminNote, benchmarkRate, scopeAdjustment, aboveBand, signoffStatus, signedOffBy, ...t1 } = t0;
+      const t = await withRelevantWork(t1);
       if ((t.slotsNeeded || 1) <= 1) return t;
       const workerRows = await prisma.task.findMany({
         where: { groupId: t.id },
-        select: { id: true, status: true, workerId: true, reviews: true, acceptedBy: { select: { fullName: true, phone: true, rating: true } } }
+        select: { id: true, status: true, workerId: true, taskType: true, reviews: VISIBLE_REVIEW, arrivedAt: true, startedAt: true, acceptedBy: { select: XPERT_FOR_EMPLOYER } }
       });
-      return { ...t, acceptedWorkers: workerRows };
+      return { ...t, acceptedWorkers: await Promise.all(workerRows.map(withRelevantWork)) };
     }));
 
     res.json({ tasks: withWorkers });
@@ -417,7 +452,7 @@ router.get('/mine', authWorker, async (req, res) => {
     await expireStaleOffers();
     const tasks = await prisma.task.findMany({
       where: { workerId: req.workerId, status: { in: ['offered', 'accepted', 'pending_confirmation', 'payment_pending', 'employer_confirmed'] } },
-      include: { employer: { select: { orgName: true, contactPerson: true, phone: true, address: true, rating: true } }, reviews: true },
+      include: { employer: { select: { orgName: true, contactPerson: true, phone: true, address: true, rating: true } }, reviews: VISIBLE_REVIEW },
       orderBy: { createdAt: 'desc' }
     });
     res.json({ tasks });
@@ -448,6 +483,7 @@ router.patch('/:id/accept', authWorker, requireActiveWorker, async (req, res) =>
         return res.status(409).json({ error: 'This job was just taken by another worker.', stale: true });
       }
       const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+      touchAssignment(task.id, req.workerId, { confirmedAt: new Date() });
       return res.json({ task, filled: 1, slots: 1, full: true });
     }
 
@@ -482,9 +518,16 @@ router.patch('/:id/accept', authWorker, requireActiveWorker, async (req, res) =>
         scheduledDate:     existing.scheduledDate,
         scheduledTime:     existing.scheduledTime,
         transportAllowance: existing.transportAllowance,
+        durationHours:     existing.durationHours,
+        photoUrls:         existing.photoUrls,
+        requiredSkills:    existing.requiredSkills,
+        specialRequirements: existing.specialRequirements,
+        equipmentNotes:    existing.equipmentNotes,
+        siteNotes:         existing.siteNotes,
       }
     });
 
+    touchAssignment(personalTask.id, req.workerId, { confirmedAt: new Date() });
     return res.json({ task: personalTask, filled, slots, full: nowFull });
   } catch (err) {
     console.error('[tasks/accept]', err.message);
@@ -517,13 +560,14 @@ router.patch('/:id/accept-offer', authWorker, requireActiveWorker, async (req, r
     }
     const task = await prisma.task.update({
       where: { id: req.params.id },
-      data: { status: 'accepted' },
+      data: { status: 'accepted', replacementInProgress: false },
       include: {
         acceptedBy: { select: { fullName: true } },
         employer: { select: { phone: true, contactPerson: true } }
       }
     });
     res.json({ task });
+    touchAssignment(task.id, req.workerId, { confirmedAt: new Date() });
 
     // Push doesn't need a phone number, so it fires independently of the
     // SMS's own phone check below — an employer with no phone on file can
@@ -624,6 +668,7 @@ router.patch('/:id/worker-done', authWorker, async (req, res) => {
     const own = await prisma.task.findUnique({ where: { id: req.params.id }, select: { workerId: true, status: true } });
     if (!own || own.workerId !== req.workerId) return res.status(404).json({ error: 'Task not found' });
     if (own.status !== 'accepted') return res.status(409).json({ error: 'This job is not in progress.' });
+    touchAssignment(req.params.id, req.workerId, { completedAt: new Date() });
     const task = await prisma.task.update({
       where: { id: req.params.id },
       data: { status: 'pending_confirmation' },
@@ -700,8 +745,24 @@ router.post('/:id/review', authEitherParty, async (req, res) => {
       if (task.employerId !== req.userId) return res.status(403).json({ error: 'This is not your task.' });
     }
 
-    if (req.role === 'employer' && (!inRange(skillsRating) || !inRange(professionalismRating))) {
-      return res.status(400).json({ error: 'Please rate skills and professionalism (1 to 5).' });
+    const num = (k) => parseInt(req.body[k], 10);
+    let structured = {};
+    if (req.role === 'employer') {
+      const attendanceRating = num('attendanceRating');
+      const taskCompletionRating = num('taskCompletionRating');
+      const priceFairness = ['fair', 'too_high', 'too_low'].includes(req.body.priceFairness) ? req.body.priceFairness : null;
+      if (![attendanceRating, skillsRating, professionalismRating, taskCompletionRating].every(inRange)) {
+        return res.status(400).json({ error: 'Please rate attendance, quality of work, professionalism and task completion (1 to 5).' });
+      }
+      if (!priceFairness) return res.status(400).json({ error: 'Please tell us whether the price was fair.' });
+      structured = { skillsRating, professionalismRating, qualityRating: skillsRating, attendanceRating, taskCompletionRating, priceFairness };
+    } else {
+      const keys = ['taskAccuracyRating', 'employerBehaviorRating', 'paymentRating', 'workingConditionsRating', 'scopeChangesRating', 'communicationRating'];
+      const vals = keys.map(num);
+      if (!vals.every(inRange)) {
+        return res.status(400).json({ error: 'Please answer every question (1 to 5).' });
+      }
+      structured = Object.fromEntries(keys.map((k, i) => [k, vals[i]]));
     }
 
     const existing = await prisma.review.findUnique({
@@ -714,7 +775,7 @@ router.post('/:id/review', authEitherParty, async (req, res) => {
         taskId: task.id,
         fromRole: req.role,
         rating: numRating,
-        ...(req.role === 'employer' ? { skillsRating, professionalismRating } : {}),
+        ...structured,
         comment,
         // The review is ABOUT whichever party did not write it.
         workerId: req.role === 'employer' ? task.workerId : null,
@@ -756,9 +817,95 @@ router.get('/worker-history', authWorker, async (req, res) => {
   try {
     const tasks = await prisma.task.findMany({
       where: { workerId: req.workerId, status: 'completed' },
-      include: { employer: { select: { orgName: true, rating: true } }, reviews: true },
+      include: { employer: { select: { orgName: true, rating: true } }, reviews: VISIBLE_REVIEW },
       orderBy: { createdAt: 'desc' }
     });
     res.json({ tasks });
   } catch (err) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// PATCH /api/tasks/:id/arrived — the Xpert checks in on site.
+router.patch('/:id/arrived', authWorker, async (req, res) => {
+  try {
+    const task = await prisma.task.findUnique({ where: { id: req.params.id }, select: { id: true, workerId: true, status: true, employerId: true, taskType: true, arrivedAt: true } });
+    if (!task || task.workerId !== req.workerId) return res.status(404).json({ error: 'Task not found' });
+    if (task.status !== 'accepted') return res.status(409).json({ error: 'This job is not in progress.' });
+    if (task.arrivedAt) return res.json({ task });
+    const updated = await prisma.task.update({ where: { id: task.id }, data: { arrivedAt: new Date() } });
+    touchAssignment(task.id, req.workerId, { arrivedAt: updated.arrivedAt });
+    res.json({ task: updated });
+    sendPushToUser({ employerId: task.employerId }, { title: 'Xpert arrived', body: `Your Xpert has arrived for "${task.taskType}".`, url: '/' });
+  } catch (err) {
+    console.error('[tasks] arrived failed:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PATCH /api/tasks/:id/started — the Xpert starts work.
+router.patch('/:id/started', authWorker, async (req, res) => {
+  try {
+    const task = await prisma.task.findUnique({ where: { id: req.params.id }, select: { id: true, workerId: true, status: true, arrivedAt: true, startedAt: true } });
+    if (!task || task.workerId !== req.workerId) return res.status(404).json({ error: 'Task not found' });
+    if (task.status !== 'accepted') return res.status(409).json({ error: 'This job is not in progress.' });
+    if (task.startedAt) return res.json({ task });
+    const now = new Date();
+    const updated = await prisma.task.update({ where: { id: task.id }, data: { startedAt: now, arrivedAt: task.arrivedAt || now } });
+    res.json({ task: updated });
+  } catch (err) {
+    console.error('[tasks] started failed:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/tasks/:id/flag — either side raises a named incident (what
+// happened and when) about the other. A low rating alone never does this.
+// Body { category, incidentDescription, incidentDate: 'YYYY-MM-DD' }
+router.post('/:id/flag', authEitherParty, async (req, res) => {
+  const category = String(req.body.category || '').trim().slice(0, 60);
+  const incidentDescription = String(req.body.incidentDescription || '').trim();
+  const incidentDate = String(req.body.incidentDate || '').trim();
+  if (!category) return res.status(400).json({ error: 'Choose what the flag is about.' });
+  if (incidentDescription.length < 10) return res.status(400).json({ error: 'Describe what happened.' });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(incidentDate)) return res.status(400).json({ error: 'Give the date it happened.' });
+  try {
+    const task = await prisma.task.findUnique({ where: { id: req.params.id }, select: { id: true, workerId: true, employerId: true } });
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    const mine = req.role === 'worker' ? task.workerId === req.userId : task.employerId === req.userId;
+    if (!mine || !task.workerId) return res.status(404).json({ error: 'Task not found' });
+    const flag = await prisma.flag.create({
+      data: {
+        taskId: task.id,
+        raisedByType: req.role === 'worker' ? 'xpert' : 'employer',
+        raisedById: req.userId,
+        againstType: req.role === 'worker' ? 'employer' : 'xpert',
+        againstId: req.role === 'worker' ? task.employerId : task.workerId,
+        category, incidentDescription: incidentDescription.slice(0, 3000), incidentDate,
+      },
+    });
+    res.status(201).json({ flag: { id: flag.id, status: flag.status } });
+  } catch (err) {
+    console.error('[tasks] flag failed:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/tasks/recurring — the employer's recurring services. The
+// preferred team is chosen by BeyondX and never listed here.
+router.get('/recurring', authEmployer, async (req, res) => {
+  try {
+    const services = await prisma.recurringService.findMany({
+      where: { employerId: req.employerId },
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json({
+      services: services.map(({ preferredXpertIds, template, ...s }) => ({
+        ...s,
+        preferredTeamAssigned: (preferredXpertIds || []).length > 0,
+        workersNeeded: (() => { try { return JSON.parse(template).workersNeeded || 1; } catch { return 1; } })(),
+      })),
+    });
+  } catch (err) {
+    console.error('[tasks] recurring failed:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
 });

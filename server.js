@@ -14,6 +14,7 @@ app.use(express.json());
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/workers', require('./routes/workers'));
 app.use('/admin', require('./routes/admin'));
+app.use('/admin', require('./routes/adminClosedLoop'));
 app.use('/api/tasks', require('./routes/tasks'));
 app.use('/api/verification', require('./routes/verification'));
 app.use('/api/track', require('./routes/track'));
