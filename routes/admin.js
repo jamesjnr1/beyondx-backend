@@ -1070,6 +1070,7 @@ const APPLICATION_SELECT = {
   accountStatus: true, applicationNote: true, activatedAt: true, activatedBy: true, createdAt: true,
   xpertStatus: true, guarantorOutcome: true, guarantorExplainerSentAt: true, evidenceOutcome: true, evidenceTaskType: true,
   referenceOutcome: true, referenceAttempts: true, certificationUrls: true, verificationSource: true,
+  reverificationRequired: true, verificationSubmittedAt: true,
 };
 
 // GET /admin/applications?status=under_review|active|suspended|rejected|all

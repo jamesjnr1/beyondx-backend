@@ -107,6 +107,9 @@ model Worker {
   priceBandAdjustedAt    DateTime?
   priceBandAdjustedBy    String?
   priceBandReason        String?
+  // Existing Xperts paused until they complete the new verification process.
+  reverificationRequired Boolean   @default(false)
+  verificationSubmittedAt DateTime?
   createdAt      DateTime     @default(now())
   dispatches     Dispatch[]
   ussdSessions   UssdSession[]

@@ -448,6 +448,7 @@ const XPERT_SELECT = {
   guarantorExplainerSentAt: true, guarantorCallbackAt: true, guarantorOutcome: true,
   referenceName: true, referencePhone: true, referenceRelationship: true,
   referenceOutcome: true, referenceAttempts: true, referenceCalledBy: true, referenceCalledAt: true,
+  reverificationRequired: true, verificationSubmittedAt: true,
   skillEvidenceUrls: true, certificationUrls: true, evidenceTaskType: true, evidenceOutcome: true,
   evidenceReviewedBy: true, evidenceReviewedAt: true, experienceSummary: true,
   priceFloor: true, priceCeiling: true, priceBandAdjustedAt: true, priceBandAdjustedBy: true, priceBandReason: true,
@@ -522,7 +523,10 @@ router.get('/queues/guarantor', async (req, res) => {
   try {
     const closed = await closeExpiredGuarantors();
     const xperts = await prisma.worker.findMany({
-      where: { xpertStatus: { in: ['applied', 'guarantor_pending'] }, OR: [{ guarantorOutcome: null }, { guarantorOutcome: 'no_response' }] },
+      where: {
+        xpertStatus: { in: ['applied', 'guarantor_pending'] }, OR: [{ guarantorOutcome: null }, { guarantorOutcome: 'no_response' }],
+        NOT: { reverificationRequired: true, verificationSubmittedAt: null },
+      },
       select: XPERT_SELECT, orderBy: { createdAt: 'asc' },
     });
     res.json({ xperts, closedForTimeout: closed, timeoutDays: GUARANTOR_TIMEOUT_DAYS });
@@ -618,7 +622,10 @@ const REFERENCE_SCRIPT = [
 router.get('/queues/reference', async (req, res) => {
   try {
     const xperts = await prisma.worker.findMany({
-      where: { xpertStatus: { in: SCREENING }, OR: [{ referenceOutcome: null }, { referenceOutcome: 'inconclusive' }] },
+      where: {
+        xpertStatus: { in: SCREENING }, OR: [{ referenceOutcome: null }, { referenceOutcome: 'inconclusive' }],
+        NOT: { reverificationRequired: true, verificationSubmittedAt: null },
+      },
       select: XPERT_SELECT, orderBy: { createdAt: 'asc' },
     });
     res.json({ xperts, script: REFERENCE_SCRIPT, maxAttempts: REFERENCE_MAX_ATTEMPTS });
@@ -783,6 +790,93 @@ router.get('/feedback', async (req, res) => {
     });
     res.json({ reviews });
   } catch (err) { fail(res, err, 'feedback'); }
+});
+
+// ── RE-VERIFICATION OF EXISTING XPERTS ─────────────────────────────────────
+// Pauses every active Xpert until they complete the new verification
+// process, and texts them. Xperts in the middle of a job are skipped so the
+// job can finish; run it again later to catch them.
+const REVERIFY_MESSAGE =
+  'BeyondX: Hi {name}, we have a new verification process for all Xperts. Your account is paused until you complete it. ' +
+  'Log in at beyondxco.com and submit your ID photo, guarantor, reference and work photos. Questions? Call 0545213741.';
+const ON_JOB = ['offered', 'accepted', 'pending_confirmation'];
+
+async function reverifyTargets() {
+  const active = await prisma.worker.findMany({
+    where: { accountStatus: 'active', reverificationRequired: false },
+    select: { id: true, fullName: true, phone: true, tasks: { where: { status: { in: ON_JOB } }, select: { id: true } } },
+  });
+  return { eligible: active.filter(w => !w.tasks.length), onJob: active.filter(w => w.tasks.length) };
+}
+
+function smsFor(template, w) {
+  const first = (w.fullName || '').split(' ')[0] || 'there';
+  return template.replace(/\{name\}/g, first);
+}
+
+// Send in the background, a little apart, so the gateway isn't flooded.
+function sendBatch(list, template) {
+  (async () => {
+    for (const w of list) {
+      if (!w.phone) continue;
+      try { await sendSMS(w.phone, smsFor(template, w)); } catch (e) { console.error('[reverify sms]', e.message); }
+      await new Promise(r => setTimeout(r, 300));
+    }
+  })();
+}
+
+router.get('/reverification/preview', async (req, res) => {
+  try {
+    const { eligible, onJob } = await reverifyTargets();
+    const [paused, submitted] = await Promise.all([
+      prisma.worker.count({ where: { reverificationRequired: true, verificationSubmittedAt: null } }),
+      prisma.worker.count({ where: { reverificationRequired: true, verificationSubmittedAt: { not: null } } }),
+    ]);
+    res.json({
+      eligible: eligible.length, withPhone: eligible.filter(w => w.phone).length,
+      onJob: onJob.map(w => ({ id: w.id, fullName: w.fullName })),
+      alreadyPaused: paused, submitted, message: REVERIFY_MESSAGE,
+    });
+  } catch (err) { fail(res, err, 'reverify-preview'); }
+});
+
+// POST /admin/reverification — body { message?, by, confirm: true }
+router.post('/reverification', async (req, res) => {
+  if (req.body.confirm !== true) return res.status(400).json({ error: 'Confirmation required.' });
+  const template = text(req.body.message, 480) || REVERIFY_MESSAGE;
+  try {
+    const { eligible, onJob } = await reverifyTargets();
+    let paused = 0;
+    for (const w of eligible) {
+      try {
+        await setXpertStatus(w.id, 'applied', { by: by(req), reason: 'Paused for re-verification under the new verification process' });
+        await prisma.worker.update({
+          where: { id: w.id },
+          data: {
+            reverificationRequired: true, verificationSubmittedAt: null,
+            guarantorOutcome: null, guarantorCallbackAt: null, guarantorExplainerSentAt: null,
+            evidenceOutcome: null, referenceOutcome: null, referenceAttempts: 0, applicationNote: null,
+          },
+        });
+        paused++;
+      } catch (e) { console.error('[reverify]', w.id, e.message); }
+    }
+    res.json({ paused, skippedOnJob: onJob.length, smsQueued: eligible.filter(w => w.phone).length });
+    sendBatch(eligible, template);
+  } catch (err) { fail(res, err, 'reverify'); }
+});
+
+// POST /admin/reverification/remind — text paused Xperts who haven't submitted yet.
+router.post('/reverification/remind', async (req, res) => {
+  const template = text(req.body.message, 480) || REVERIFY_MESSAGE;
+  try {
+    const list = await prisma.worker.findMany({
+      where: { reverificationRequired: true, verificationSubmittedAt: null, accountStatus: 'under_review' },
+      select: { id: true, fullName: true, phone: true },
+    });
+    res.json({ smsQueued: list.filter(w => w.phone).length });
+    sendBatch(list, template);
+  } catch (err) { fail(res, err, 'reverify-remind'); }
 });
 
 module.exports = router;

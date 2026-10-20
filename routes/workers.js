@@ -3,6 +3,8 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const { calcProximity, calcProximityAsync } = require('../utils/proximity');
 const prisma  = require('../lib/prisma');
+const { sendSMS } = require('../utils/sms');
+const { setXpertStatus } = require('../lib/xpertStatus');
 
 const router  = express.Router();
 function authWorker(req, res, next) {
@@ -47,6 +49,7 @@ router.get('/me', authWorker, async (req, res) => {
         referenceName: true, referencePhone: true, referenceRelationship: true,
         skillEvidenceUrls: true, experienceSummary: true, activatedAt: true, idVerified: true,
         guarantorOutcome: true, evidenceOutcome: true, referenceOutcome: true, certificationUrls: true,
+        idCardNumber: true, evidenceTaskType: true, reverificationRequired: true, verificationSubmittedAt: true,
         reviewsReceived: {
           where: { fromRole: 'employer' },
           select: { rating: true, skillsRating: true, professionalismRating: true, createdAt: true },
@@ -175,6 +178,66 @@ router.patch('/me', authWorker, async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('[workers/me PATCH] update failed:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PATCH /api/workers/me/verification — an existing Xpert paused for
+// re-verification submits everything the new process needs. Same rules as a
+// new application. Sends the guarantor explainer and moves them into the
+// screening queues; they stay without jobs until BeyondX approves them.
+router.patch('/me/verification', authWorker, async (req, res) => {
+  const b = req.body || {};
+  const isHttps = (u) => typeof u === 'string' && u.startsWith('https://');
+  const phoneOk = (p) => /^0[2357]\d{8}$/.test(String(p || ''));
+  const str = (v, n = 200) => String(v || '').trim().slice(0, n);
+  try {
+    const me = await prisma.worker.findUnique({ where: { id: req.workerId }, select: { id: true, phone: true, fullName: true, skills: true, reverificationRequired: true } });
+    if (!me) return res.status(404).json({ error: 'Account not found' });
+    if (!me.reverificationRequired) return res.status(409).json({ error: 'Your account does not need re-verification.' });
+    const evidence = Array.isArray(b.skillEvidenceUrls) ? b.skillEvidenceUrls.filter(isHttps).slice(0, 10) : [];
+    const certs = Array.isArray(b.certificationUrls) ? b.certificationUrls.filter(isHttps).slice(0, 5) : [];
+    const skills = Array.isArray(b.skills) && b.skills.length ? b.skills.map(x => str(x, 60)).slice(0, 10) : me.skills;
+    if (!skills.length) return res.status(400).json({ error: 'Select at least one skill.' });
+    if (!b.idType || !str(b.idCardNumber)) return res.status(400).json({ error: 'ID type and ID number are required.' });
+    if (!isHttps(b.idDocumentUrl)) return res.status(400).json({ error: 'A photo of your ID is required.' });
+    if (str(b.experienceSummary, 2000).length < 10) return res.status(400).json({ error: 'Please describe your work experience.' });
+    if (!str(b.guarantorName) || !phoneOk(b.guarantorPhone)) return res.status(400).json({ error: 'Guarantor name and a valid Ghana phone number are required.' });
+    if (!str(b.referenceName) || !phoneOk(b.referencePhone) || !str(b.referenceRelationship)) return res.status(400).json({ error: 'Reference name, phone and relationship are required.' });
+    if (b.referencePhone === b.guarantorPhone) return res.status(400).json({ error: 'Your reference must be a different person from your guarantor.' });
+    if (b.guarantorPhone === me.phone || b.referencePhone === me.phone) return res.status(400).json({ error: 'Your guarantor and reference must have different numbers from yours.' });
+    if (/family|relative|brother|sister|mother|father|parent|spouse|wife|husband|cousin|uncle|aunt/i.test(b.referenceRelationship)) {
+      return res.status(400).json({ error: 'Your reference cannot be a family member. Choose a past employer or someone in your trade.' });
+    }
+    if (!evidence.length) return res.status(400).json({ error: 'Add at least one photo or video link of your work.' });
+
+    const worker = await prisma.worker.update({
+      where: { id: me.id },
+      data: {
+        skills, idType: str(b.idType, 50), idCardNumber: str(b.idCardNumber, 50), idDocumentUrl: b.idDocumentUrl,
+        experienceSummary: str(b.experienceSummary, 2000),
+        guarantorName: str(b.guarantorName, 100), guarantorPhone: b.guarantorPhone, guarantorRelationship: str(b.guarantorRelationship, 100) || null,
+        referenceName: str(b.referenceName, 100), referencePhone: b.referencePhone, referenceRelationship: str(b.referenceRelationship, 100),
+        skillEvidenceUrls: evidence, certificationUrls: certs,
+        evidenceTaskType: skills.includes(b.evidenceTaskType) ? b.evidenceTaskType : skills[0],
+        evidenceOutcome: 'pending', guarantorOutcome: null, referenceOutcome: null, referenceAttempts: 0,
+        verificationSubmittedAt: new Date(), guarantorExplainerSentAt: new Date(),
+      },
+    });
+    res.json({ ok: true });
+
+    // Guarantor explainer (character reference only, no liability), then
+    // into the guarantor queue.
+    const applicant = (worker.fullName || 'An Xpert').split(' ')[0];
+    const g = (worker.guarantorName || '').split(' ')[0] || 'there';
+    sendSMS(worker.guarantorPhone,
+      `BeyondX: Hi ${g}, ${applicant} named you as their guarantor to work through BeyondX. ` +
+      `This is a character reference only - you are not responsible for any money or legal matters. ` +
+      `A BeyondX team member will call you to confirm.`);
+    setXpertStatus(worker.id, 'guarantor_pending', { by: 'system', reason: 'Re-verification submitted; guarantor explainer sent' })
+      .catch(e => console.error('[reverify submit]', e.message));
+  } catch (err) {
+    console.error('[workers/me/verification]', err.message);
     res.status(500).json({ error: 'Server error' });
   }
 });
