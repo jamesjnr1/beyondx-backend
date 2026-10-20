@@ -794,19 +794,44 @@ router.get('/feedback', async (req, res) => {
 
 // ── RE-VERIFICATION OF EXISTING XPERTS ─────────────────────────────────────
 // Pauses every active Xpert until they complete the new verification
-// process, and texts them. Xperts in the middle of a job are skipped so the
-// job can finish; run it again later to catch them.
+// process, and texts them all — including Xperts who are on a job. Those
+// keep their accepted job and can finish it (check-ins and "done" don't
+// need an active account); offers they haven't accepted yet are released
+// back to the Job Board so BeyondX can reassign them.
 const REVERIFY_MESSAGE =
   'BeyondX: Hi {name}, we have a new verification process for all Xperts. Your account is paused until you complete it. ' +
   'Log in at beyondxco.com and submit your ID photo, guarantor, reference and work photos. Questions? Call 0545213741.';
-const ON_JOB = ['offered', 'accepted', 'pending_confirmation'];
+const IN_PROGRESS = ['accepted', 'pending_confirmation'];
 
 async function reverifyTargets() {
   const active = await prisma.worker.findMany({
     where: { accountStatus: 'active', reverificationRequired: false },
-    select: { id: true, fullName: true, phone: true, tasks: { where: { status: { in: ON_JOB } }, select: { id: true } } },
+    select: {
+      id: true, fullName: true, phone: true,
+      tasks: { where: { status: { in: ['offered', ...IN_PROGRESS] } }, select: { id: true, status: true, groupId: true } },
+    },
   });
-  return { eligible: active.filter(w => !w.tasks.length), onJob: active.filter(w => w.tasks.length) };
+  return {
+    eligible: active,
+    onJob: active.filter(w => w.tasks.some(t => IN_PROGRESS.includes(t.status))),
+    withOffers: active.filter(w => w.tasks.some(t => t.status === 'offered')),
+  };
+}
+
+// Offers the Xpert hasn't accepted go back for reassignment. Rows from a
+// multi-Xpert dispatch are withdrawn (the group's other offers stay open).
+async function releaseOffers(worker, actor) {
+  const offers = worker.tasks.filter(t => t.status === 'offered');
+  for (const t of offers) {
+    await prisma.task.update({
+      where: { id: t.id },
+      data: t.groupId
+        ? { status: 'cancelled', adminNote: `Offer withdrawn: Xpert paused for re-verification (${actor})` }
+        : { status: 'open', workerId: null, backupWorkerId: null, adminNote: `Offer released: Xpert paused for re-verification (${actor}). Reassign in Job Board.` },
+    });
+    await prisma.assignment.updateMany({ where: { taskId: t.id, workerId: worker.id, status: 'active' }, data: { status: 'released' } });
+  }
+  return offers.length;
 }
 
 function smsFor(template, w) {
@@ -827,7 +852,7 @@ function sendBatch(list, template) {
 
 router.get('/reverification/preview', async (req, res) => {
   try {
-    const { eligible, onJob } = await reverifyTargets();
+    const { eligible, onJob, withOffers } = await reverifyTargets();
     const [paused, submitted] = await Promise.all([
       prisma.worker.count({ where: { reverificationRequired: true, verificationSubmittedAt: null } }),
       prisma.worker.count({ where: { reverificationRequired: true, verificationSubmittedAt: { not: null } } }),
@@ -835,6 +860,7 @@ router.get('/reverification/preview', async (req, res) => {
     res.json({
       eligible: eligible.length, withPhone: eligible.filter(w => w.phone).length,
       onJob: onJob.map(w => ({ id: w.id, fullName: w.fullName })),
+      offersToRelease: withOffers.reduce((n, w) => n + w.tasks.filter(t => t.status === 'offered').length, 0),
       alreadyPaused: paused, submitted, message: REVERIFY_MESSAGE,
     });
   } catch (err) { fail(res, err, 'reverify-preview'); }
@@ -846,9 +872,10 @@ router.post('/reverification', async (req, res) => {
   const template = text(req.body.message, 480) || REVERIFY_MESSAGE;
   try {
     const { eligible, onJob } = await reverifyTargets();
-    let paused = 0;
+    let paused = 0, offersReleased = 0;
     for (const w of eligible) {
       try {
+        offersReleased += await releaseOffers(w, by(req));
         await setXpertStatus(w.id, 'applied', { by: by(req), reason: 'Paused for re-verification under the new verification process' });
         await prisma.worker.update({
           where: { id: w.id },
@@ -861,7 +888,7 @@ router.post('/reverification', async (req, res) => {
         paused++;
       } catch (e) { console.error('[reverify]', w.id, e.message); }
     }
-    res.json({ paused, skippedOnJob: onJob.length, smsQueued: eligible.filter(w => w.phone).length });
+    res.json({ paused, onJob: onJob.length, offersReleased, smsQueued: eligible.filter(w => w.phone).length });
     sendBatch(eligible, template);
   } catch (err) { fail(res, err, 'reverify'); }
 });
