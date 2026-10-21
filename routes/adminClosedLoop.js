@@ -9,7 +9,7 @@ const prisma = require('../lib/prisma');
 const { sendSMS } = require('../utils/sms');
 const { calcProximity } = require('../utils/proximity');
 const { sendPushToUser } = require('../lib/push');
-const { setXpertStatus, StatusError } = require('../lib/xpertStatus');
+const { setXpertStatus, StatusError, approvedFirst } = require('../lib/xpertStatus');
 const {
   applyChangeOrderRule, defaultPricingType, CHANGE_ORDER_RULES,
   GUARANTOR_TIMEOUT_DAYS, REFERENCE_MAX_ATTEMPTS, XPERT_STATUSES, REASON_REQUIRED,
@@ -466,7 +466,7 @@ router.get('/xperts', async (req, res) => {
       }),
       prisma.worker.groupBy({ by: ['xpertStatus'], _count: true }),
     ]);
-    res.json({ xperts, counts: Object.fromEntries(counts.map(c => [c.xpertStatus, c._count])) });
+    res.json({ xperts: approvedFirst(xperts), counts: Object.fromEntries(counts.map(c => [c.xpertStatus, c._count])) });
   } catch (err) { fail(res, err, 'xperts'); }
 });
 

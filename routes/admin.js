@@ -5,7 +5,7 @@ const { expireStaleOffers, notifyMatchingWorkers } = require('./tasks');
 const { calcProximity } = require('../utils/proximity');
 const { sendPushToAudience, sendPushToUser } = require('../lib/push');
 const prisma  = require('../lib/prisma');
-const { setXpertStatus, StatusError } = require('../lib/xpertStatus');
+const { setXpertStatus, StatusError, approvedFirst } = require('../lib/xpertStatus');
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'beyondx2026';
 
@@ -379,6 +379,10 @@ router.get('/workers', adminAuth, async (req, res) => {
         homeLng:        true,
         guarantorRelationship: true,
         createdAt:      true,
+        accountStatus:  true,
+        xpertStatus:    true,
+        activatedAt:    true,
+        reverificationRequired: true,
         role:           true,
         coordinatorApplication: true,
         priority:       true,
@@ -391,7 +395,8 @@ router.get('/workers', adminAuth, async (req, res) => {
       },
       orderBy: { createdAt: 'desc' }
     });
-    const flattened = workers.map(w => ({
+    // Most recently approved first (see approvedFirst).
+    const flattened = approvedFirst(workers).map(w => ({
       ...w,
       isBusy: (w.tasks || []).length > 0,
       tasks: undefined
@@ -1082,7 +1087,7 @@ router.get('/applications', adminAuth, async (req, res) => {
       select: APPLICATION_SELECT,
       orderBy: { createdAt: 'desc' },
     });
-    res.json({ workers });
+    res.json({ workers: approvedFirst(workers) });
   } catch (err) {
     console.error('[admin] applications failed:', err.message);
     res.status(500).json({ error: 'Server error' });
